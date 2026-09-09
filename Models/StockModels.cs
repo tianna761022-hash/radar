@@ -21,6 +21,10 @@ namespace StockAnalyzer.Models
         public string Sector { get; set; } = "電子";
         public string Date { get; set; } = string.Empty;
         public decimal PrevClose { get; set; }
+        public decimal CapitalInBillion { get; set; } // 實收資本額(億元)
+        public long ForeignNetBuyLots { get; set; } // 外資買賣超張數
+        public long TrustNetBuyLots { get; set; } // 投信買賣超張數
+        public long DealerNetBuyLots { get; set; } // 自營商買賣超張數
     }
 
     public class StockDailyData
@@ -78,6 +82,8 @@ namespace StockAnalyzer.Models
         public string OvernightWhaleRisk { get; set; } = "純淨安全"; // 純淨安全 / 輕微關注 / ⚠️ 隔日沖重災
         public string TrustStatus { get; set; } = "無"; // 👑 投信初胚認養 / 投信持續買超 / 無
         public long TrustNetBuyLots { get; set; } // 投信買超張數
+        public long ForeignNetBuyLots { get; set; } // 外資買超張數
+        public long DealerNetBuyLots { get; set; } // 自營商買超張數
 
         // 風報比與防守停損停利
         public decimal DefensivePrice { get; set; } // 建議防守停損價

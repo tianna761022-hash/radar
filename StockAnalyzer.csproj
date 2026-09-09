@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="stock_radar_cloud_deploy\**;新增資料夾\**" />
+    <Content Remove="stock_radar_cloud_deploy\**;新增資料夾\**" />
+    <EmbeddedResource Remove="stock_radar_cloud_deploy\**;新增資料夾\**" />
+    <None Remove="stock_radar_cloud_deploy\**;新增資料夾\**" />
     <Content Update="Data\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>

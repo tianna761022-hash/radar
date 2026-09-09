@@ -16,6 +16,9 @@ namespace StockAnalyzer.Services
         private readonly HttpClient _httpClient;
         private readonly ConcurrentDictionary<string, StockRawQuote> _quoteCache = new();
         private readonly ConcurrentDictionary<string, List<StockDailyData>> _historyCache = new();
+        private readonly ConcurrentDictionary<string, decimal> _capitalCache = new(); // Code -> Capital (Billion TWD)
+        private readonly ConcurrentDictionary<string, (long Foreign, long Trust, long Dealer)> _institutionalCache = new();
+        
         private DateTime _lastFetchTime = DateTime.MinValue;
         private string _latestTradeDate = "";
         private readonly object _lock = new();
@@ -26,18 +29,24 @@ namespace StockAnalyzer.Services
         public StockDataService(IHttpClientFactory httpClientFactory)
         {
             _httpClient = httpClientFactory.CreateClient();
-            _httpClient.Timeout = TimeSpan.FromSeconds(7);
-            _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+            _httpClient.Timeout = TimeSpan.FromSeconds(12);
+            _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            
+            // Ensure Data directory
+            var dataDir = Path.Combine(Directory.GetCurrentDirectory(), "Data");
+            if (!Directory.Exists(dataDir)) Directory.CreateDirectory(dataDir);
+            var histDir = Path.Combine(dataDir, "history");
+            if (!Directory.Exists(histDir)) Directory.CreateDirectory(histDir);
         }
 
         public async Task<List<StockRawQuote>> GetAllMarketQuotesAsync(bool forceRefresh = false)
         {
-            if (_quoteCache.Count > 500 && !forceRefresh && (DateTime.Now - _lastFetchTime).TotalMinutes < 60)
+            if (_quoteCache.Count > 500 && !forceRefresh && (DateTime.Now - _lastFetchTime).TotalMinutes < 30)
             {
                 return _quoteCache.Values.ToList();
             }
 
-            // 1. If cache is empty, load instantly from local market_snapshot.json (0ms startup!)
+            // 1. Initial startup load from local market_snapshot.json
             if (_quoteCache.Count < 300)
             {
                 var snapshotQuotes = LoadFromSnapshotFile();
@@ -52,30 +61,13 @@ namespace StockAnalyzer.Services
                 }
             }
 
-            // 2. If we already have quotes, return them immediately if not force refresh
+            // 2. Return cached if valid and not force refresh
             if (_quoteCache.Count > 300 && !forceRefresh)
             {
-                // Trigger background online update if data is older than 30 minutes
-                if ((DateTime.Now - _lastFetchTime).TotalMinutes > 30)
-                {
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            var fresh = await FetchAllOnlineQuotesAsync();
-                            if (fresh.Count > 300)
-                            {
-                                foreach (var q in fresh) _quoteCache[q.Code] = q;
-                                _lastFetchTime = DateTime.Now;
-                            }
-                        }
-                        catch { }
-                    });
-                }
                 return _quoteCache.Values.ToList();
             }
 
-            // 3. Online fetch (if force refresh requested or cache still empty)
+            // 3. Online fetch real market data
             var quotes = await FetchAllOnlineQuotesAsync();
             if (quotes.Count > 300)
             {
@@ -97,22 +89,44 @@ namespace StockAnalyzer.Services
             var twseList = new List<StockRawQuote>();
             var tpexList = new List<StockRawQuote>();
 
+            // 1. Fetch Real Paid-in Capital (TWSE OpenData)
+            try
+            {
+                await LoadRealCapitalsAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Capital Fetch Notice] {ex.Message}");
+            }
+
+            // 2. Fetch Real Institutional Daily Trading (TWSE T86)
+            try
+            {
+                await LoadRealInstitutionalTradingAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Institutional Fetch Notice] {ex.Message}");
+            }
+
+            // 3. Fetch TWSE Quotes
             try
             {
                 twseList = await FetchTwseQuotesAsync();
                 quotes.AddRange(twseList);
-                Console.WriteLine($"[TWSE Online Fetch] Successfully fetched {twseList.Count} quotes.");
+                Console.WriteLine($"[TWSE Online Fetch] Successfully fetched {twseList.Count} real quotes.");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[TWSE Fetch Error] {ex.Message}");
             }
 
+            // 4. Fetch TPEx Quotes
             try
             {
                 tpexList = await FetchTpexQuotesAsync();
                 quotes.AddRange(tpexList);
-                Console.WriteLine($"[TPEx Online Fetch] Successfully fetched {tpexList.Count} quotes.");
+                Console.WriteLine($"[TPEx Online Fetch] Successfully fetched {tpexList.Count} real quotes.");
             }
             catch (Exception ex)
             {
@@ -125,6 +139,381 @@ namespace StockAnalyzer.Services
             }
 
             return quotes;
+        }
+
+        private async Task LoadRealCapitalsAsync()
+        {
+            var url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L";
+            var resp = await _httpClient.GetStringAsync(url);
+            using var doc = JsonDocument.Parse(resp);
+            foreach (var elem in doc.RootElement.EnumerateArray())
+            {
+                var code = GetStringProp(elem, "公司代號", "Code", "code");
+                var capStr = GetStringProp(elem, "實收資本額", "PaidInCapital", "capitals");
+                if (!string.IsNullOrEmpty(code) && decimal.TryParse(capStr, out var capVal) && capVal > 0)
+                {
+                    _capitalCache[code] = Math.Round(capVal / 100_000_000m, 2); // Convert to 億元
+                }
+            }
+            Console.WriteLine($"[Capitals Loaded] Cached {_capitalCache.Count} company paid-in capitals.");
+        }
+
+        private async Task LoadRealInstitutionalTradingAsync()
+        {
+            var url = "https://www.twse.com.tw/rwd/zh/fund/T86?response=json";
+            var resp = await _httpClient.GetStringAsync(url);
+            using var doc = JsonDocument.Parse(resp);
+            if (doc.RootElement.TryGetProperty("data", out var dataElem) && dataElem.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var row in dataElem.EnumerateArray())
+                {
+                    if (row.GetArrayLength() >= 19)
+                    {
+                        var code = row[0].GetString()?.Trim() ?? "";
+                        if (string.IsNullOrEmpty(code) || code.Length > 6) continue;
+
+                        var foreignNet = ParseLong(row[4].GetString()) / 1000; // 外資買賣超張數
+                        var trustNet = ParseLong(row[10].GetString()) / 1000;   // 投信買賣超張數
+                        var dealerNet = ParseLong(row[11].GetString()) / 1000;  // 自營商買賣超張數
+
+                        _institutionalCache[code] = (foreignNet, trustNet, dealerNet);
+                    }
+                }
+                Console.WriteLine($"[Institutional Loaded] Cached {_institutionalCache.Count} stock institutional records from TWSE T86.");
+            }
+        }
+
+        private async Task<List<StockRawQuote>> FetchTwseQuotesAsync()
+        {
+            var list = new List<StockRawQuote>();
+            var url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
+            var resp = await _httpClient.GetStringAsync(url);
+            
+            using var doc = JsonDocument.Parse(resp);
+            foreach (var elem in doc.RootElement.EnumerateArray())
+            {
+                var code = elem.GetProperty("Code").GetString() ?? "";
+                var name = elem.GetProperty("Name").GetString() ?? "";
+                
+                if (code.Length > 6 || string.IsNullOrWhiteSpace(name)) continue;
+
+                var dateStr = elem.TryGetProperty("Date", out var dProp) ? dProp.GetString() ?? "" : "";
+                var formattedDate = FormatRocDate(dateStr);
+                if (!string.IsNullOrEmpty(formattedDate) && string.IsNullOrEmpty(_latestTradeDate))
+                {
+                    _latestTradeDate = formattedDate;
+                }
+
+                var open = ParseDecimal(elem.GetProperty("OpeningPrice").GetString());
+                var high = ParseDecimal(elem.GetProperty("HighestPrice").GetString());
+                var low = ParseDecimal(elem.GetProperty("LowestPrice").GetString());
+                var close = ParseDecimal(elem.GetProperty("ClosingPrice").GetString());
+                var change = ParseDecimal(elem.GetProperty("Change").GetString());
+                var volume = ParseLong(elem.GetProperty("TradeVolume").GetString());
+                var val = ParseDecimal(elem.GetProperty("TradeValue").GetString());
+                var trans = ParseInt(elem.GetProperty("Transaction").GetString());
+
+                if (close <= 0) continue;
+
+                var prevClose = close - change;
+                var changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
+
+                _capitalCache.TryGetValue(code, out var capInBillion);
+                _institutionalCache.TryGetValue(code, out var inst);
+
+                list.Add(new StockRawQuote
+                {
+                    Code = code,
+                    Name = name,
+                    Open = open > 0 ? open : close,
+                    High = high > 0 ? high : close,
+                    Low = low > 0 ? low : close,
+                    Close = close,
+                    PrevClose = prevClose > 0 ? prevClose : close,
+                    Change = change,
+                    ChangePercent = Math.Round(changePercent, 2),
+                    VolumeShares = volume,
+                    TurnoverValue = val,
+                    Transactions = trans,
+                    Market = "上市",
+                    Sector = DetermineSector(code, name),
+                    Date = formattedDate,
+                    CapitalInBillion = capInBillion,
+                    ForeignNetBuyLots = inst.Foreign,
+                    TrustNetBuyLots = inst.Trust,
+                    DealerNetBuyLots = inst.Dealer
+                });
+            }
+
+            return list;
+        }
+
+        private async Task<List<StockRawQuote>> FetchTpexQuotesAsync()
+        {
+            var list = new List<StockRawQuote>();
+            var url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes";
+            var resp = await _httpClient.GetStringAsync(url);
+
+            using var doc = JsonDocument.Parse(resp);
+            foreach (var elem in doc.RootElement.EnumerateArray())
+            {
+                var code = elem.GetProperty("SecuritiesCompanyCode").GetString() ?? "";
+                var name = elem.GetProperty("CompanyName").GetString() ?? "";
+
+                if (code.Length > 6 || string.IsNullOrWhiteSpace(name)) continue;
+
+                var dateStr = elem.TryGetProperty("Date", out var dProp) ? dProp.GetString() ?? "" : "";
+                var formattedDate = FormatRocDate(dateStr);
+                if (!string.IsNullOrEmpty(formattedDate) && string.IsNullOrEmpty(_latestTradeDate))
+                {
+                    _latestTradeDate = formattedDate;
+                }
+
+                var open = ParseDecimal(elem.GetProperty("Open").GetString());
+                var high = ParseDecimal(elem.GetProperty("High").GetString());
+                var low = ParseDecimal(elem.GetProperty("Low").GetString());
+                var close = ParseDecimal(elem.GetProperty("Close").GetString());
+                var change = ParseDecimal(elem.GetProperty("Change").GetString());
+                var volume = ParseLong(elem.GetProperty("TradingShares").GetString());
+                var val = ParseDecimal(elem.GetProperty("TransactionAmount").GetString());
+                var trans = ParseInt(elem.GetProperty("TransactionNumber").GetString());
+                var capStr = elem.TryGetProperty("Capitals", out var capProp) ? capProp.GetString() : "0";
+                var capVal = ParseDecimal(capStr);
+                var capInBillion = capVal > 0 ? Math.Round(capVal / 100_000_000m, 2) : 0m;
+                if (capInBillion > 0) _capitalCache[code] = capInBillion;
+
+                if (close <= 0) continue;
+
+                var prevClose = close - change;
+                var changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
+
+                _institutionalCache.TryGetValue(code, out var inst);
+
+                list.Add(new StockRawQuote
+                {
+                    Code = code,
+                    Name = name,
+                    Open = open > 0 ? open : close,
+                    High = high > 0 ? high : close,
+                    Low = low > 0 ? low : close,
+                    Close = close,
+                    PrevClose = prevClose > 0 ? prevClose : close,
+                    Change = change,
+                    ChangePercent = Math.Round(changePercent, 2),
+                    VolumeShares = volume,
+                    TurnoverValue = val,
+                    Transactions = trans,
+                    Market = "上櫃",
+                    Sector = DetermineSector(code, name),
+                    Date = formattedDate,
+                    CapitalInBillion = capInBillion,
+                    ForeignNetBuyLots = inst.Foreign,
+                    TrustNetBuyLots = inst.Trust,
+                    DealerNetBuyLots = inst.Dealer
+                });
+            }
+
+            return list;
+        }
+
+        public List<StockDailyData> GetStockHistory(string code, StockRawQuote? currentQuote = null)
+        {
+            // 1. Check in-memory cache
+            if (_historyCache.TryGetValue(code, out var cached) && cached.Count >= 20)
+            {
+                return cached;
+            }
+
+            // 2. Check local file cache
+            var filePath = Path.Combine(Directory.GetCurrentDirectory(), "Data", "history", $"{code}.json");
+            if (File.Exists(filePath))
+            {
+                try
+                {
+                    var json = File.ReadAllText(filePath);
+                    var list = JsonSerializer.Deserialize<List<StockDailyData>>(json);
+                    if (list != null && list.Count >= 15)
+                    {
+                        // Check if latest date is up to date with today's quote
+                        if (currentQuote != null && list.Last().Date != LatestTradeDate && currentQuote.Close > 0)
+                        {
+                            AppendTodayQuote(list, currentQuote);
+                        }
+                        _historyCache[code] = list;
+                        return list;
+                    }
+                }
+                catch { }
+            }
+
+            // 3. Fetch Real History from FinMind API
+            try
+            {
+                var realHistory = FetchRealFinMindHistory(code, currentQuote);
+                if (realHistory.Count > 0)
+                {
+                    _historyCache[code] = realHistory;
+                    try
+                    {
+                        var json = JsonSerializer.Serialize(realHistory, new JsonSerializerOptions { WriteIndented = true });
+                        File.WriteAllText(filePath, json);
+                    }
+                    catch { }
+                    return realHistory;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FinMind History Fetch Error {code}] {ex.Message}");
+            }
+
+            // 4. If network unavailable, build single real data point for today
+            var fallback = new List<StockDailyData>();
+            if (currentQuote != null)
+            {
+                fallback.Add(new StockDailyData
+                {
+                    Date = LatestTradeDate,
+                    Open = currentQuote.Open,
+                    High = currentQuote.High,
+                    Low = currentQuote.Low,
+                    Close = currentQuote.Close,
+                    VolumeLots = currentQuote.VolumeLots,
+                    TurnoverValue = currentQuote.TurnoverValue,
+                    Change = currentQuote.Change,
+                    ChangePercent = currentQuote.ChangePercent,
+                    MA5 = currentQuote.Close,
+                    MA10 = currentQuote.Close,
+                    MA20 = currentQuote.Close,
+                    MA60 = currentQuote.Close,
+                    VMA5 = currentQuote.VolumeLots,
+                    VMA20 = currentQuote.VolumeLots
+                });
+            }
+            return fallback;
+        }
+
+        private List<StockDailyData> FetchRealFinMindHistory(string code, StockRawQuote? currentQuote)
+        {
+            var startDate = DateTime.Today.AddDays(-120).ToString("yyyy-MM-dd");
+            var url = $"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={code}&start_date={startDate}";
+            
+            var resp = _httpClient.GetStringAsync(url).GetAwaiter().GetResult();
+            using var doc = JsonDocument.Parse(resp);
+            if (!doc.RootElement.TryGetProperty("data", out var dataElem) || dataElem.ValueKind != JsonValueKind.Array)
+            {
+                return new List<StockDailyData>();
+            }
+
+            var rawPoints = new List<(string Date, decimal Open, decimal High, decimal Low, decimal Close, long VolumeLots, decimal Val, decimal Spread)>();
+
+            foreach (var item in dataElem.EnumerateArray())
+            {
+                var date = item.GetProperty("date").GetString() ?? "";
+                var open = item.GetProperty("open").GetDecimal();
+                var high = item.GetProperty("max").GetDecimal();
+                var low = item.GetProperty("min").GetDecimal();
+                var close = item.GetProperty("close").GetDecimal();
+                var volShares = item.GetProperty("Trading_Volume").GetInt64();
+                var val = item.GetProperty("Trading_money").GetDecimal();
+                var spread = item.GetProperty("spread").GetDecimal();
+
+                if (close <= 0) continue;
+
+                rawPoints.Add((date, open, high, low, close, volShares / 1000, val, spread));
+            }
+
+            if (rawPoints.Count == 0) return new List<StockDailyData>();
+
+            // If current quote date is newer than FinMind last date, append current quote
+            if (currentQuote != null && currentQuote.Close > 0 && (rawPoints.Count == 0 || rawPoints.Last().Date != LatestTradeDate))
+            {
+                rawPoints.Add((LatestTradeDate, currentQuote.Open, currentQuote.High, currentQuote.Low, currentQuote.Close, currentQuote.VolumeLots, currentQuote.TurnoverValue, currentQuote.Change));
+            }
+
+            // Compute Real Moving Averages and Technical Indicators
+            var result = new List<StockDailyData>();
+            for (int i = 0; i < rawPoints.Count; i++)
+            {
+                var item = rawPoints[i];
+                var ma5 = rawPoints.Skip(Math.Max(0, i - 4)).Take(Math.Min(i + 1, 5)).Average(x => x.Close);
+                var ma10 = rawPoints.Skip(Math.Max(0, i - 9)).Take(Math.Min(i + 1, 10)).Average(x => x.Close);
+                var ma20 = rawPoints.Skip(Math.Max(0, i - 19)).Take(Math.Min(i + 1, 20)).Average(x => x.Close);
+                var ma60 = rawPoints.Skip(Math.Max(0, i - 59)).Take(Math.Min(i + 1, 60)).Average(x => x.Close);
+                var vma5 = (decimal)rawPoints.Skip(Math.Max(0, i - 4)).Take(Math.Min(i + 1, 5)).Average(x => x.VolumeLots);
+                var vma20 = (decimal)rawPoints.Skip(Math.Max(0, i - 19)).Take(Math.Min(i + 1, 20)).Average(x => x.VolumeLots);
+
+                var prevClose = i > 0 ? rawPoints[i - 1].Close : item.Open;
+                var change = item.Close - prevClose;
+                var changePct = prevClose > 0 ? (change / prevClose) * 100 : 0;
+
+                var amplitude = item.High - item.Low;
+                var clv = amplitude > 0 ? (item.Close - item.Low) / amplitude : 0.5m;
+                var upperShadow = amplitude > 0 ? (item.High - Math.Max(item.Open, item.Close)) / amplitude : 0m;
+
+                result.Add(new StockDailyData
+                {
+                    Date = item.Date,
+                    Open = item.Open,
+                    High = item.High,
+                    Low = item.Low,
+                    Close = item.Close,
+                    VolumeLots = item.VolumeLots,
+                    TurnoverValue = item.Val,
+                    Change = Math.Round(change, 2),
+                    ChangePercent = Math.Round(changePct, 2),
+                    CLV = Math.Round(clv, 4),
+                    UpperShadowRatio = Math.Round(upperShadow, 4),
+                    MA5 = Math.Round(ma5, 2),
+                    MA10 = Math.Round(ma10, 2),
+                    MA20 = Math.Round(ma20, 2),
+                    MA60 = Math.Round(ma60, 2),
+                    VMA5 = Math.Round(vma5, 0),
+                    VMA20 = Math.Round(vma20, 0)
+                });
+            }
+
+            return result;
+        }
+
+        private void AppendTodayQuote(List<StockDailyData> list, StockRawQuote currentQuote)
+        {
+            var amplitude = currentQuote.High - currentQuote.Low;
+            var clv = amplitude > 0 ? (currentQuote.Close - currentQuote.Low) / amplitude : 0.5m;
+            var upperShadow = amplitude > 0 ? (currentQuote.High - Math.Max(currentQuote.Open, currentQuote.Close)) / amplitude : 0m;
+
+            var closeList = list.Select(x => x.Close).ToList();
+            closeList.Add(currentQuote.Close);
+            var volList = list.Select(x => (decimal)x.VolumeLots).ToList();
+            volList.Add(currentQuote.VolumeLots);
+
+            var ma5 = closeList.TakeLast(5).Average();
+            var ma10 = closeList.TakeLast(10).Average();
+            var ma20 = closeList.TakeLast(20).Average();
+            var ma60 = closeList.TakeLast(60).Average();
+            var vma5 = volList.TakeLast(5).Average();
+            var vma20 = volList.TakeLast(20).Average();
+
+            list.Add(new StockDailyData
+            {
+                Date = LatestTradeDate,
+                Open = currentQuote.Open,
+                High = currentQuote.High,
+                Low = currentQuote.Low,
+                Close = currentQuote.Close,
+                VolumeLots = currentQuote.VolumeLots,
+                TurnoverValue = currentQuote.TurnoverValue,
+                Change = currentQuote.Change,
+                ChangePercent = currentQuote.ChangePercent,
+                CLV = Math.Round(clv, 4),
+                UpperShadowRatio = Math.Round(upperShadow, 4),
+                MA5 = Math.Round(ma5, 2),
+                MA10 = Math.Round(ma10, 2),
+                MA20 = Math.Round(ma20, 2),
+                MA60 = Math.Round(ma60, 2),
+                VMA5 = Math.Round(vma5, 0),
+                VMA20 = Math.Round(vma20, 0)
+            });
         }
 
         private void SaveSnapshotAsync(List<StockRawQuote> twse, List<StockRawQuote> tpex)
@@ -185,7 +574,7 @@ namespace StockAnalyzer.Services
                         var arr = ExtractArrayElement(twseElem);
                         if (arr.ValueKind == JsonValueKind.Array)
                         {
-                            list.AddRange(ParseTwseElements(arr));
+                            list.AddRange(ParseSnapshotElements(arr, "上市"));
                         }
                     }
 
@@ -194,13 +583,8 @@ namespace StockAnalyzer.Services
                         var arr = ExtractArrayElement(tpexElem);
                         if (arr.ValueKind == JsonValueKind.Array)
                         {
-                            list.AddRange(ParseTpexElements(arr));
+                            list.AddRange(ParseSnapshotElements(arr, "上櫃"));
                         }
-                    }
-
-                    if (list.Count == 0 && doc.RootElement.ValueKind == JsonValueKind.Array)
-                    {
-                        list.AddRange(ParseTwseElements(doc.RootElement));
                     }
                 }
             }
@@ -209,11 +593,55 @@ namespace StockAnalyzer.Services
                 Console.WriteLine($"[Snapshot Load Error] {ex.Message}");
             }
 
-            if (list.Count < 50)
-            {
-                list = GenerateFallbackQuotes();
-            }
+            return list;
+        }
 
+        private List<StockRawQuote> ParseSnapshotElements(JsonElement elem, string market)
+        {
+            var list = new List<StockRawQuote>();
+            foreach (var item in elem.EnumerateArray())
+            {
+                var code = GetStringProp(item, "Code", "code", "SecuritiesCompanyCode");
+                var name = GetStringProp(item, "Name", "name", "CompanyName");
+                if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(name)) continue;
+
+                var open = GetDecimalProp(item, "Open", "OpeningPrice");
+                var high = GetDecimalProp(item, "High", "HighestPrice");
+                var low = GetDecimalProp(item, "Low", "LowestPrice");
+                var close = GetDecimalProp(item, "Close", "ClosingPrice");
+                var change = GetDecimalProp(item, "Change");
+                var changePct = GetDecimalProp(item, "ChangePercent");
+                var volShares = GetLongProp(item, "VolumeShares", "TradingShares", "TradeVolume");
+                var val = GetDecimalProp(item, "TurnoverValue", "TransactionAmount", "TradeValue");
+                var trans = (int)GetLongProp(item, "Transactions", "TransactionNumber", "Transaction");
+                var cap = GetDecimalProp(item, "CapitalInBillion", "Capitals");
+                var foreign = GetLongProp(item, "ForeignNetBuyLots");
+                var trust = GetLongProp(item, "TrustNetBuyLots");
+                var dealer = GetLongProp(item, "DealerNetBuyLots");
+                var date = GetStringProp(item, "Date", "date");
+
+                list.Add(new StockRawQuote
+                {
+                    Code = code,
+                    Name = name,
+                    Open = open,
+                    High = high,
+                    Low = low,
+                    Close = close,
+                    Change = change,
+                    ChangePercent = changePct,
+                    VolumeShares = volShares,
+                    TurnoverValue = val,
+                    Transactions = trans,
+                    Market = market,
+                    Sector = DetermineSector(code, name),
+                    Date = date,
+                    CapitalInBillion = cap,
+                    ForeignNetBuyLots = foreign,
+                    TrustNetBuyLots = trust,
+                    DealerNetBuyLots = dealer
+                });
+            }
             return list;
         }
 
@@ -227,134 +655,6 @@ namespace StockAnalyzer.Services
                 if (elem.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.Array) return d;
             }
             return default;
-        }
-
-        private List<StockRawQuote> ParseTwseElements(JsonElement twseElem)
-        {
-            var list = new List<StockRawQuote>();
-            foreach (var elem in twseElem.EnumerateArray())
-            {
-                var code = GetStringProp(elem, "Code", "code", "SecuritiesCompanyCode");
-                var name = GetStringProp(elem, "Name", "name", "CompanyName");
-                if (string.IsNullOrWhiteSpace(code) || code.Length > 6 || string.IsNullOrWhiteSpace(name)) continue;
-
-                var dateStr = GetStringProp(elem, "Date", "date");
-                var formattedDate = FormatRocDate(dateStr);
-                if (!string.IsNullOrEmpty(formattedDate) && string.IsNullOrEmpty(_latestTradeDate))
-                {
-                    _latestTradeDate = formattedDate;
-                }
-
-                var open = GetDecimalProp(elem, "OpeningPrice", "Open", "open");
-                var high = GetDecimalProp(elem, "HighestPrice", "High", "high");
-                var low = GetDecimalProp(elem, "LowestPrice", "Low", "low");
-                var close = GetDecimalProp(elem, "ClosingPrice", "Close", "close");
-                var change = GetDecimalProp(elem, "Change", "change");
-                var volume = GetLongProp(elem, "TradeVolume", "TradingShares", "VolumeShares", "volumeShares");
-                if (volume == 0)
-                {
-                    var lots = GetLongProp(elem, "VolumeLots", "volumeLots");
-                    if (lots > 0) volume = lots * 1000;
-                }
-                var val = GetDecimalProp(elem, "TradeValue", "TransactionAmount", "TurnoverValue", "turnoverValue");
-                var trans = (int)GetLongProp(elem, "Transaction", "TransactionNumber", "Transactions", "transactions");
-
-                if (close <= 0) continue;
-
-                var prevClose = close - change;
-                var changePercent = GetDecimalProp(elem, "ChangePercent", "changePercent");
-                if (changePercent == 0 && prevClose > 0)
-                {
-                    changePercent = Math.Round((change / prevClose) * 100, 2);
-                }
-
-                var sector = GetStringProp(elem, "Sector", "sector");
-                if (string.IsNullOrEmpty(sector)) sector = DetermineSector(code, name);
-
-                list.Add(new StockRawQuote
-                {
-                    Code = code,
-                    Name = name,
-                    Open = open > 0 ? open : close,
-                    High = high > 0 ? high : close,
-                    Low = low > 0 ? low : close,
-                    Close = close,
-                    PrevClose = prevClose > 0 ? prevClose : close,
-                    Change = change,
-                    ChangePercent = changePercent,
-                    VolumeShares = volume,
-                    TurnoverValue = val,
-                    Transactions = trans,
-                    Market = "上市",
-                    Sector = sector,
-                    Date = formattedDate
-                });
-            }
-            return list;
-        }
-
-        private List<StockRawQuote> ParseTpexElements(JsonElement tpexElem)
-        {
-            var list = new List<StockRawQuote>();
-            foreach (var elem in tpexElem.EnumerateArray())
-            {
-                var code = GetStringProp(elem, "SecuritiesCompanyCode", "Code", "code");
-                var name = GetStringProp(elem, "CompanyName", "Name", "name");
-                if (string.IsNullOrWhiteSpace(code) || code.Length > 6 || string.IsNullOrWhiteSpace(name)) continue;
-
-                var dateStr = GetStringProp(elem, "Date", "date");
-                var formattedDate = FormatRocDate(dateStr);
-                if (!string.IsNullOrEmpty(formattedDate) && string.IsNullOrEmpty(_latestTradeDate))
-                {
-                    _latestTradeDate = formattedDate;
-                }
-
-                var open = GetDecimalProp(elem, "Open", "open", "OpeningPrice");
-                var high = GetDecimalProp(elem, "High", "high", "HighestPrice");
-                var low = GetDecimalProp(elem, "Low", "low", "LowestPrice");
-                var close = GetDecimalProp(elem, "Close", "close", "ClosingPrice");
-                var change = GetDecimalProp(elem, "Change", "change");
-                var volume = GetLongProp(elem, "TradingShares", "TradeVolume", "VolumeShares", "volumeShares");
-                if (volume == 0)
-                {
-                    var lots = GetLongProp(elem, "VolumeLots", "volumeLots");
-                    if (lots > 0) volume = lots * 1000;
-                }
-                var val = GetDecimalProp(elem, "TransactionAmount", "TradeValue", "TurnoverValue", "turnoverValue");
-                var trans = (int)GetLongProp(elem, "TransactionNumber", "Transaction", "Transactions", "transactions");
-
-                if (close <= 0) continue;
-
-                var prevClose = close - change;
-                var changePercent = GetDecimalProp(elem, "ChangePercent", "changePercent");
-                if (changePercent == 0 && prevClose > 0)
-                {
-                    changePercent = Math.Round((change / prevClose) * 100, 2);
-                }
-
-                var sector = GetStringProp(elem, "Sector", "sector");
-                if (string.IsNullOrEmpty(sector)) sector = DetermineSector(code, name);
-
-                list.Add(new StockRawQuote
-                {
-                    Code = code,
-                    Name = name,
-                    Open = open > 0 ? open : close,
-                    High = high > 0 ? high : close,
-                    Low = low > 0 ? low : close,
-                    Close = close,
-                    PrevClose = prevClose > 0 ? prevClose : close,
-                    Change = change,
-                    ChangePercent = changePercent,
-                    VolumeShares = volume,
-                    TurnoverValue = val,
-                    Transactions = trans,
-                    Market = "上櫃",
-                    Sector = sector,
-                    Date = formattedDate
-                });
-            }
-            return list;
         }
 
         private static string GetStringProp(JsonElement elem, params string[] propNames)
@@ -402,123 +702,6 @@ namespace StockAnalyzer.Services
                 }
             }
             return 0L;
-        }
-
-        private async Task<List<StockRawQuote>> FetchTwseQuotesAsync()
-        {
-            var list = new List<StockRawQuote>();
-            var url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL";
-            var resp = await _httpClient.GetStringAsync(url);
-            
-            using var doc = JsonDocument.Parse(resp);
-            foreach (var elem in doc.RootElement.EnumerateArray())
-            {
-                var code = elem.GetProperty("Code").GetString() ?? "";
-                var name = elem.GetProperty("Name").GetString() ?? "";
-                
-                // Exclude warrants and special instruments (keep 4~5 digit regular common stocks and ETFs)
-                if (code.Length > 6 || string.IsNullOrWhiteSpace(name)) continue;
-
-                var dateStr = elem.TryGetProperty("Date", out var dProp) ? dProp.GetString() ?? "" : "";
-                var formattedDate = FormatRocDate(dateStr);
-                if (!string.IsNullOrEmpty(formattedDate) && string.IsNullOrEmpty(_latestTradeDate))
-                {
-                    _latestTradeDate = formattedDate;
-                }
-
-                var open = ParseDecimal(elem.GetProperty("OpeningPrice").GetString());
-                var high = ParseDecimal(elem.GetProperty("HighestPrice").GetString());
-                var low = ParseDecimal(elem.GetProperty("LowestPrice").GetString());
-                var close = ParseDecimal(elem.GetProperty("ClosingPrice").GetString());
-                var change = ParseDecimal(elem.GetProperty("Change").GetString());
-                var volume = ParseLong(elem.GetProperty("TradeVolume").GetString());
-                var val = ParseDecimal(elem.GetProperty("TradeValue").GetString());
-                var trans = ParseInt(elem.GetProperty("Transaction").GetString());
-
-                if (close <= 0) continue;
-
-                var prevClose = close - change;
-                var changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
-
-                list.Add(new StockRawQuote
-                {
-                    Code = code,
-                    Name = name,
-                    Open = open > 0 ? open : close,
-                    High = high > 0 ? high : close,
-                    Low = low > 0 ? low : close,
-                    Close = close,
-                    PrevClose = prevClose > 0 ? prevClose : close,
-                    Change = change,
-                    ChangePercent = Math.Round(changePercent, 2),
-                    VolumeShares = volume,
-                    TurnoverValue = val,
-                    Transactions = trans,
-                    Market = "上市",
-                    Sector = DetermineSector(code, name),
-                    Date = formattedDate
-                });
-            }
-
-            return list;
-        }
-
-        private async Task<List<StockRawQuote>> FetchTpexQuotesAsync()
-        {
-            var list = new List<StockRawQuote>();
-            var url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes";
-            var resp = await _httpClient.GetStringAsync(url);
-
-            using var doc = JsonDocument.Parse(resp);
-            foreach (var elem in doc.RootElement.EnumerateArray())
-            {
-                var code = elem.GetProperty("SecuritiesCompanyCode").GetString() ?? "";
-                var name = elem.GetProperty("CompanyName").GetString() ?? "";
-
-                if (code.Length > 6 || string.IsNullOrWhiteSpace(name)) continue;
-
-                var dateStr = elem.TryGetProperty("Date", out var dProp) ? dProp.GetString() ?? "" : "";
-                var formattedDate = FormatRocDate(dateStr);
-                if (!string.IsNullOrEmpty(formattedDate) && string.IsNullOrEmpty(_latestTradeDate))
-                {
-                    _latestTradeDate = formattedDate;
-                }
-
-                var open = ParseDecimal(elem.GetProperty("Open").GetString());
-                var high = ParseDecimal(elem.GetProperty("High").GetString());
-                var low = ParseDecimal(elem.GetProperty("Low").GetString());
-                var close = ParseDecimal(elem.GetProperty("Close").GetString());
-                var change = ParseDecimal(elem.GetProperty("Change").GetString());
-                var volume = ParseLong(elem.GetProperty("TradingShares").GetString());
-                var val = ParseDecimal(elem.GetProperty("TransactionAmount").GetString());
-                var trans = ParseInt(elem.GetProperty("TransactionNumber").GetString());
-
-                if (close <= 0) continue;
-
-                var prevClose = close - change;
-                var changePercent = prevClose > 0 ? (change / prevClose) * 100 : 0;
-
-                list.Add(new StockRawQuote
-                {
-                    Code = code,
-                    Name = name,
-                    Open = open > 0 ? open : close,
-                    High = high > 0 ? high : close,
-                    Low = low > 0 ? low : close,
-                    Close = close,
-                    PrevClose = prevClose > 0 ? prevClose : close,
-                    Change = change,
-                    ChangePercent = Math.Round(changePercent, 2),
-                    VolumeShares = volume,
-                    TurnoverValue = val,
-                    Transactions = trans,
-                    Market = "上櫃",
-                    Sector = DetermineSector(code, name),
-                    Date = formattedDate
-                });
-            }
-
-            return list;
         }
 
         private static decimal ParseDecimal(string? str)
@@ -580,109 +763,6 @@ namespace StockAnalyzer.Services
             return rocDate;
         }
 
-        public List<StockDailyData> GetStockHistory(string code, StockRawQuote? currentQuote = null)
-        {
-            if (_historyCache.TryGetValue(code, out var cached) && cached.Count >= 60)
-            {
-                return cached;
-            }
-
-            // Generate realistic 90-day historical data based on current quote price, volume & technical cycles
-            var quote = currentQuote ?? (_quoteCache.TryGetValue(code, out var q) ? q : null);
-            var history = GenerateHistoricalSeries(code, quote);
-            _historyCache[code] = history;
-            return history;
-        }
-
-        private List<StockDailyData> GenerateHistoricalSeries(string code, StockRawQuote? quote)
-        {
-            var basePrice = quote?.Close ?? 100m;
-            var currentLots = quote?.VolumeLots ?? 1500;
-            var random = new Random(code.GetHashCode());
-
-            var history = new List<StockDailyData>();
-            var today = DateTime.Today;
-            var days = 80;
-            var currentP = basePrice;
-
-            // Generate backwards
-            var tempSeries = new List<(DateTime Date, decimal Open, decimal High, decimal Low, decimal Close, long VolumeLots, decimal Val)>();
-
-            for (int i = 0; i < days; i++)
-            {
-                var date = today.AddDays(-i);
-                if (date.DayOfWeek == DayOfWeek.Saturday || date.DayOfWeek == DayOfWeek.Sunday) continue;
-
-                if (i == 0 && quote != null)
-                {
-                    tempSeries.Add((date, quote.Open, quote.High, quote.Low, quote.Close, quote.VolumeLots, quote.TurnoverValue));
-                    continue;
-                }
-
-                // Simulate realistic price trajectory (consolidation, gentle drift, moving averages)
-                var dailyReturn = (decimal)(random.NextDouble() * 0.04 - 0.018); // -1.8% to +2.2%
-                var prevC = currentP / (1 + dailyReturn);
-                var c = currentP;
-                var o = prevC * (1 + (decimal)(random.NextDouble() * 0.01 - 0.005));
-                var h = Math.Max(o, c) * (1 + (decimal)(random.NextDouble() * 0.012));
-                var l = Math.Min(o, c) * (1 - (decimal)(random.NextDouble() * 0.012));
-                
-                // Historical volume
-                var volMultiplier = (decimal)(0.3 + random.NextDouble() * 0.9);
-                if (i <= 3) volMultiplier *= 0.6m; // recent days surge relative to prior
-                var vol = Math.Max(100, (long)(currentLots * volMultiplier));
-                var val = vol * 1000 * c;
-
-                tempSeries.Add((date, Math.Round(o, 2), Math.Round(h, 2), Math.Round(l, 2), Math.Round(c, 2), vol, Math.Round(val, 0)));
-                currentP = prevC;
-            }
-
-            tempSeries.Reverse();
-
-            // Calculate Moving Averages (MA5, MA10, MA20, MA60) and Volume Averages (VMA5, VMA20)
-            for (int i = 0; i < tempSeries.Count; i++)
-            {
-                var item = tempSeries[i];
-                var ma5 = tempSeries.Skip(Math.Max(0, i - 4)).Take(Math.Min(i + 1, 5)).Average(x => x.Close);
-                var ma10 = tempSeries.Skip(Math.Max(0, i - 9)).Take(Math.Min(i + 1, 10)).Average(x => x.Close);
-                var ma20 = tempSeries.Skip(Math.Max(0, i - 19)).Take(Math.Min(i + 1, 20)).Average(x => x.Close);
-                var ma60 = tempSeries.Skip(Math.Max(0, i - 59)).Take(Math.Min(i + 1, 60)).Average(x => x.Close);
-                var vma5 = (decimal)tempSeries.Skip(Math.Max(0, i - 4)).Take(Math.Min(i + 1, 5)).Average(x => x.VolumeLots);
-                var vma20 = (decimal)tempSeries.Skip(Math.Max(0, i - 19)).Take(Math.Min(i + 1, 20)).Average(x => x.VolumeLots);
-
-                var prevClose = i > 0 ? tempSeries[i - 1].Close : item.Open;
-                var change = item.Close - prevClose;
-                var changePct = prevClose > 0 ? (change / prevClose) * 100 : 0;
-
-                var amplitude = item.High - item.Low;
-                var clv = amplitude > 0 ? (item.Close - item.Low) / amplitude : 0.5m;
-                var upperShadow = amplitude > 0 ? (item.High - Math.Max(item.Open, item.Close)) / amplitude : 0;
-
-                history.Add(new StockDailyData
-                {
-                    Date = item.Date.ToString("yyyy-MM-dd"),
-                    Open = item.Open,
-                    High = item.High,
-                    Low = item.Low,
-                    Close = item.Close,
-                    VolumeLots = item.VolumeLots,
-                    TurnoverValue = item.Val,
-                    Change = Math.Round(change, 2),
-                    ChangePercent = Math.Round(changePct, 2),
-                    CLV = Math.Round(clv, 4),
-                    UpperShadowRatio = Math.Round(upperShadow, 4),
-                    MA5 = Math.Round(ma5, 2),
-                    MA10 = Math.Round(ma10, 2),
-                    MA20 = Math.Round(ma20, 2),
-                    MA60 = Math.Round(ma60, 2),
-                    VMA5 = Math.Round(vma5, 0),
-                    VMA20 = Math.Round(vma20, 0)
-                });
-            }
-
-            return history;
-        }
-
         private string DetermineSector(string code, string name)
         {
             if (code.StartsWith("23") || code.StartsWith("24") || code.StartsWith("30") || code.StartsWith("32") || code.StartsWith("35") || code.StartsWith("36") || code.StartsWith("52") || code.StartsWith("54") || code.StartsWith("62") || code.StartsWith("64") || code.StartsWith("66") || code.StartsWith("80") || code.StartsWith("82"))
@@ -703,67 +783,6 @@ namespace StockAnalyzer.Services
             if (code.StartsWith("84") || code.StartsWith("83") || code.StartsWith("99") || name.Contains("環") || name.Contains("龍") || name.Contains("綠")) return "綠色循環/貴金屬精煉";
             
             return "其他產業";
-        }
-
-        private List<StockRawQuote> GenerateFallbackQuotes()
-        {
-            var list = new List<StockRawQuote>();
-            var seedStocks = new[]
-            {
-                ("2330", "台積電", 1025m, 15m, 1.48m, 32000000L, "上市", "半導體/電子零組件"),
-                ("3017", "奇鋐", 685m, 12m, 1.78m, 12500000L, "上市", "半導體/電子零組件"),
-                ("3324", "雙鴻", 780m, 8m, 1.04m, 8600000L, "上櫃", "半導體/電子零組件"),
-                ("3450", "聯鈞", 248m, 4.5m, 1.85m, 28000000L, "上市", "半導體/電子零組件"),
-                ("3081", "聯亞", 365m, 6.0m, 1.67m, 14200000L, "上櫃", "半導體/電子零組件"),
-                ("6442", "光聖", 520m, 9.0m, 1.76m, 9800000L, "上市", "半導體/電子零組件"),
-                ("3131", "弘塑", 1920m, 25m, 1.32m, 3500000L, "上櫃", "半導體/電子零組件"),
-                ("3583", "辛耘", 465m, 7.5m, 1.64m, 11000000L, "上市", "半導體/電子零組件"),
-                ("6187", "萬潤", 488m, 6.0m, 1.24m, 13500000L, "上櫃", "半導體/電子零組件"),
-                ("6150", "撼訊", 98.5m, 2.3m, 2.39m, 18500000L, "上櫃", "電子科技"),
-                ("2465", "麗臺", 112m, 2.5m, 2.28m, 16200000L, "上市", "電子科技"),
-                ("5386", "青雲", 92.4m, 1.8m, 1.99m, 8500000L, "上櫃", "電子科技"),
-                ("9955", "佳龍", 36.8m, 0.8m, 2.22m, 24000000L, "上市", "綠色循環/貴金屬精煉"),
-                ("1785", "光洋科", 68.2m, 1.1m, 1.64m, 19500000L, "上櫃", "綠色循環/貴金屬精煉"),
-                ("8390", "金益鼎", 88.6m, 1.6m, 1.84m, 11200000L, "上櫃", "綠色循環/貴金屬精煉"),
-                ("8033", "雷虎", 64.5m, 1.2m, 1.90m, 15800000L, "上市", "電機機械/綠能重電"),
-                ("3491", "昇達科", 335m, 5.5m, 1.67m, 8900000L, "上櫃", "電子科技"),
-                ("1519", "華城", 720m, 14m, 1.98m, 10500000L, "上市", "電機機械/綠能重電"),
-                ("1513", "中興電", 188m, 3.0m, 1.62m, 22000000L, "上市", "電機機械/綠能重電"),
-                ("1503", "士電", 242m, 4.0m, 1.68m, 9800000L, "上市", "電機機械/綠能重電"),
-                ("2317", "鴻海", 182m, 2.5m, 1.39m, 68000000L, "上市", "電子科技"),
-                ("2382", "廣達", 295m, 4.0m, 1.37m, 31000000L, "上市", "電子科技"),
-                ("6669", "緯穎", 2380m, 35m, 1.49m, 4200000L, "上市", "電子科技"),
-                ("2454", "聯發科", 1340m, 20m, 1.52m, 9800000L, "上市", "半導體/電子零組件"),
-                ("3661", "世芯-KY", 2480m, 30m, 1.22m, 3200000L, "上市", "半導體/電子零組件"),
-                ("5274", "信驊", 4680m, 60m, 1.30m, 1200000L, "上櫃", "半導體/電子零組件"),
-                ("2603", "長榮", 218m, 3.5m, 1.63m, 42000000L, "上市", "航運/物流"),
-                ("2609", "陽明", 74.2m, 1.2m, 1.64m, 58000000L, "上市", "航運/物流"),
-                ("6472", "保瑞", 790m, 10m, 1.28m, 4100000L, "上市", "生技醫療"),
-                ("6589", "台康生技", 94.5m, 1.8m, 1.94m, 12000000L, "上櫃", "生技醫療")
-            };
-
-            foreach (var s in seedStocks)
-            {
-                var turnover = (decimal)s.Item6 * s.Item3;
-                list.Add(new StockRawQuote
-                {
-                    Code = s.Item1,
-                    Name = s.Item2,
-                    Close = s.Item3,
-                    Open = s.Item3 - (s.Item4 * 0.5m),
-                    High = s.Item3 + (s.Item4 * 0.3m),
-                    Low = s.Item3 - s.Item4,
-                    Change = s.Item4,
-                    ChangePercent = s.Item5,
-                    VolumeShares = s.Item6,
-                    TurnoverValue = turnover,
-                    Transactions = (int)(s.Item6 / 5000),
-                    Market = s.Item7,
-                    Sector = s.Item8
-                });
-            }
-
-            return list;
         }
     }
 }

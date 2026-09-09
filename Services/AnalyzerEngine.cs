@@ -32,32 +32,33 @@ namespace StockAnalyzer.Services
                 if (q.VolumeLots < filterParams.MinDailyLots || q.Close <= 5) continue;
 
                 var history = _stockDataService.GetStockHistory(q.Code, q);
-                if (history.Count < 25) continue;
+                if (history.Count < 2) continue;
 
                 var today = history.Last();
-                var prevDay = history[^2];
+                var prevDay = history.Count >= 2 ? history[^2] : today;
 
-                // Calculate Moving Averages & Volume Averages
-                var ma5 = today.MA5;
-                var ma10 = today.MA10;
-                var ma20 = today.MA20;
-                var ma60 = today.MA60;
-                var vma5 = today.VMA5;
-                var vma20 = Math.Max(100, today.VMA20);
+                // Calculate Real Moving Averages & Volume Averages
+                var ma5 = today.MA5 > 0 ? today.MA5 : q.Close;
+                var ma10 = today.MA10 > 0 ? today.MA10 : q.Close;
+                var ma20 = today.MA20 > 0 ? today.MA20 : q.Close;
+                var ma60 = today.MA60 > 0 ? today.MA60 : q.Close;
+                var vma5 = today.VMA5 > 0 ? today.VMA5 : q.VolumeLots;
+                var vma20 = Math.Max(50, today.VMA20 > 0 ? today.VMA20 : q.VolumeLots);
 
+                // Real volume surge ratio
                 var volumeSurgeRatio = Math.Round((decimal)q.VolumeLots / vma20, 2);
 
-                // N-day cumulative price change & volume
+                // N-day cumulative price change
                 var n = Math.Clamp(filterParams.NDays, 1, 10);
                 var nDaysAgoIndex = Math.Max(0, history.Count - 1 - n);
                 var baseClosePrice = history[nDaysAgoIndex].Close;
                 var nDayChangePercent = baseClosePrice > 0 ? Math.Round(((q.Close - baseClosePrice) / baseClosePrice) * 100, 2) : 0;
 
-                // MA Entanglement (5MA, 10MA, 20MA, 60MA range %)
+                // Real MA Entanglement (5MA, 10MA, 20MA, 60MA range %)
                 var mas = new[] { ma5, ma10, ma20, ma60 }.Where(x => x > 0).ToList();
                 var maMin = mas.Min();
                 var maMax = mas.Max();
-                var maEntanglement = maMin > 0 ? Math.Round(((maMax - maMin) / maMin) * 100, 2) : 10;
+                var maEntanglement = maMin > 0 ? Math.Round(((maMax - maMin) / maMin) * 100, 2) : 10m;
 
                 // Master K-Line Shield Filters
                 var clv = today.CLV; // 0~1
@@ -66,29 +67,41 @@ namespace StockAnalyzer.Services
                 var upperShadowPercent = Math.Round(upperShadow * 100, 1);
                 var isSolidRed = today.Close >= today.Open && q.ChangePercent >= 0;
 
-                // Estimate Capital (in Billion TWD)
-                var random = new Random(q.Code.GetHashCode());
-                var capitalInBillion = Math.Round(12m + (decimal)(random.NextDouble() * 55), 1);
-                if (q.Code == "2330") capitalInBillion = 259.3m;
-                if (q.Code == "2317") capitalInBillion = 138.6m;
-                if (q.Code == "3017") capitalInBillion = 38.8m;
-                if (q.Code == "3450") capitalInBillion = 14.5m;
-                if (q.Code == "9955") capitalInBillion = 10.3m;
-                if (q.Code == "6150") capitalInBillion = 17.2m;
+                // Real Paid-in Capital (in Billion TWD)
+                var capitalInBillion = q.CapitalInBillion > 0 ? q.CapitalInBillion : 0m;
                 var isGoldenCapital = capitalInBillion >= 10m && capitalInBillion <= 80m;
 
-                // Chip detox & Trust status
-                var overnightWhaleScore = random.Next(1, 100);
-                var isOvernightWhale = overnightWhaleScore > 88;
-                var overnightRisk = isOvernightWhale ? "⚠️ 隔日沖偏高" : "🛡️ 純淨無污染";
+                // Real Institutional & Overnight Whale Analysis
+                var trustLots = q.TrustNetBuyLots;
+                var foreignLots = q.ForeignNetBuyLots;
+                var dealerLots = q.DealerNetBuyLots;
 
-                var isTrustInitialEntry = random.Next(1, 100) > 75;
-                var trustStatus = isTrustInitialEntry ? "👑 投信初胚剛認養" : (random.Next(1, 100) > 60 ? "📈 投信持續買超" : "無");
-                var trustLots = isTrustInitialEntry ? random.Next(350, 1800) : (trustStatus != "無" ? random.Next(100, 600) : 0);
+                string trustStatus = "無";
+                if (trustLots >= 500) trustStatus = $"👑 投信大額認養 (+{trustLots}張)";
+                else if (trustLots >= 100) trustStatus = $"📈 投信持續買超 (+{trustLots}張)";
+                else if (trustLots <= -200) trustStatus = $"⚠️ 投信減碼 ({trustLots}張)";
 
-                // Anti-Chasing-High Rule (Must not exceed max price change)
-                if (nDayChangePercent > filterParams.MaxPriceChangeInNDays + 3.0m) continue;
-                if (q.ChangePercent > 7.5m) continue; // exclude limit up
+                // Real Turnover Rate (周轉率 %)
+                var totalSharesLots = capitalInBillion > 0 ? (capitalInBillion * 100_000_000m / 10m) / 1000m : 500_000m;
+                var turnoverRatePercent = totalSharesLots > 0 ? Math.Round(((decimal)q.VolumeLots / totalSharesLots) * 100, 2) : 0m;
+
+                string overnightRisk = "🛡️ 純淨無污染";
+                if (turnoverRatePercent >= 25.0m && upperShadowPercent >= 35.0m)
+                {
+                    overnightRisk = "⚠️ 隔日沖出貨重災";
+                }
+                else if (turnoverRatePercent >= 20.0m || (dealerLots < -300 && upperShadowPercent >= 30.0m))
+                {
+                    overnightRisk = "⚠️ 短線當沖過熱";
+                }
+                else if (turnoverRatePercent >= 10.0m)
+                {
+                    overnightRisk = "輕微關注";
+                }
+
+                // Anti-Chasing-High Rule
+                if (nDayChangePercent > filterParams.MaxPriceChangeInNDays + 4.0m) continue;
+                if (q.ChangePercent > 9.8m) continue; // Exclude locked limit-up
 
                 // Match Themes & Thematic Role
                 var matchedThemes = _thematicService.MatchThemes(q.Code, q.Name, q.Sector);
@@ -103,28 +116,28 @@ namespace StockAnalyzer.Services
 
                 // Track A: 熱錢風口・資金初動型
                 var isInHotTheme = matchedThemes.Any(t => hotThemeNames.Any(h => h.Contains(t) || t.Contains(h)));
-                if (isInHotTheme && q.ChangePercent >= -0.5m && q.ChangePercent <= 4.5m && volumeSurgeRatio >= 1.4m)
+                if (isInHotTheme && q.ChangePercent >= -0.5m && q.ChangePercent <= 5.0m && volumeSurgeRatio >= 1.3m)
                 {
                     strategyTracks.Add("hotmoney");
                     signalTags.Add("🔥 資金初動接棒");
                 }
 
                 // Track B: 主力潛伏・默默吃貨型 (Volume surge + price flat + low base)
-                if (volumeSurgeRatio >= filterParams.MinSurgeRatio && Math.Abs(nDayChangePercent) <= 4.0m && clv >= 0.55m)
+                if (volumeSurgeRatio >= filterParams.MinSurgeRatio && Math.Abs(nDayChangePercent) <= 5.0m && clv >= 0.50m)
                 {
                     strategyTracks.Add("stealth");
                     signalTags.Add("💎 主力低檔吸籌");
                 }
 
                 // Track C: 均線糾結・壓縮首根突破型
-                if (maEntanglement <= 3.2m && q.Close >= ma5 && q.Close >= ma20 && q.ChangePercent >= 0.8m && volumeSurgeRatio >= 1.4m)
+                if (maEntanglement <= 4.5m && q.Close >= ma5 && q.Close >= ma20 && q.ChangePercent >= 0.5m && volumeSurgeRatio >= 1.3m)
                 {
                     strategyTracks.Add("breakout");
                     signalTags.Add("🚀 均線糾結突破");
                 }
 
                 // Track D: 洗盤窒息・拉回守穩上車型
-                var isPullbackRetest = prevDay.VolumeLots < vma20 * 0.7m && q.Close >= ma20 && q.Close >= ma10 && q.ChangePercent >= 0.2m;
+                var isPullbackRetest = prevDay.VolumeLots < vma20 * 0.8m && q.Close >= ma20 && q.Close >= ma10 && q.ChangePercent >= 0.0m;
                 if (isPullbackRetest)
                 {
                     strategyTracks.Add("pullback");
@@ -140,42 +153,43 @@ namespace StockAnalyzer.Services
                     signalTags.Insert(0, "⭐ 雙料即將起漲");
                 }
 
-                if (isGoldenCapital) signalTags.Add("🎯 10~80億黃金股本");
-                if (isTrustInitialEntry) signalTags.Add("👑 投信剛進場");
+                if (isGoldenCapital) signalTags.Add($"🎯 股本{capitalInBillion}億");
+                if (trustLots > 100) signalTags.Add($"👑 投信買超{trustLots}張");
+                if (foreignLots > 500) signalTags.Add($"🌐 外資買超{foreignLots}張");
                 if (!string.IsNullOrEmpty(usTwinName) && usTitanChange > 1.0m) signalTags.Add($"{usTwinName} {usTitanChange:+0.0;-0.0}%");
 
                 // Filter by Strategy Track if specified
                 if (filterParams.StrategyTrack != "all")
                 {
                     if (filterParams.StrategyTrack == "golden" && !strategyTracks.Contains("golden")) continue;
-                    if (filterParams.StrategyTrack == "hotmoney" && !strategyTracks.Contains("hotmoney")) continue;
-                    if (filterParams.StrategyTrack == "stealth" && !strategyTracks.Contains("stealth")) continue;
-                    if (filterParams.StrategyTrack == "breakout" && !strategyTracks.Contains("breakout")) continue;
-                    if (filterParams.StrategyTrack == "pullback" && !strategyTracks.Contains("pullback")) continue;
+                    if (filterParams.StrategyTrack != "golden" && !strategyTracks.Contains(filterParams.StrategyTrack)) continue;
                 }
 
-                // Master Defense & Target Price Calculation
-                var defensivePrice = Math.Round(Math.Min(ma20 > 0 ? ma20 : q.Close * 0.96m, q.Close * 0.955m), 2);
-                var stopLossPercent = Math.Round(((q.Close - defensivePrice) / q.Close) * 100, 1);
-                var targetPrice = Math.Round(q.Close * (1.18m + (decimal)(random.NextDouble() * 0.15)), 2);
-                var potentialProfitPercent = Math.Round(((targetPrice - q.Close) / q.Close) * 100, 1);
-                var riskReward = stopLossPercent > 0 ? Math.Round(potentialProfitPercent / stopLossPercent, 1) : 4.5m;
-                var trailingStopPrice = Math.Round(ma10 > 0 ? ma10 : q.Close * 0.97m, 2);
+                if (filterParams.RequireGoldenCapital && !isGoldenCapital) continue;
+                if (filterParams.RequireCleanChips && overnightRisk.Contains("⚠️")) continue;
 
-                // Master Score Calculation (0~100)
-                var score = 70;
+                // Defense Stop Loss & Take Profit Calculations
+                var defensivePrice = Math.Round(Math.Min(ma20 > 0 ? ma20 : q.Close * 0.95m, q.Low * 0.985m), 2);
+                var stopLossPercent = Math.Round(((q.Close - defensivePrice) / q.Close) * 100, 2);
+                if (stopLossPercent <= 0) stopLossPercent = 3.5m;
+
+                var targetPrice = Math.Round(q.Close * (1.0m + Math.Max(0.08m, stopLossPercent * 0.03m)), 2);
+                var potentialProfitPercent = Math.Round(((targetPrice - q.Close) / q.Close) * 100, 2);
+                var riskReward = stopLossPercent > 0 ? Math.Round(potentialProfitPercent / stopLossPercent, 1) : 3.5m;
+                var trailingStopPrice = Math.Round(Math.Max(ma10, ma20), 2);
+
+                // Master Score (0~100)
+                var score = 65;
                 if (strategyTracks.Contains("golden")) score += 15;
-                if (volumeSurgeRatio >= 2.0m) score += 5;
-                if (isGoldenCapital) score += 4;
-                if (isTrustInitialEntry) score += 5;
-                if (clv >= 0.70m) score += 3;
-                if (maEntanglement <= 2.5m) score += 3;
-                if (usTitanChange >= 2.0m) score += 4; // US Tech Titan Spillover Bonus
-                if (!isOvernightWhale) score += 2;
-                score = Math.Clamp(score, 60, 99);
+                if (isGoldenCapital) score += 5;
+                if (trustLots > 100) score += 5;
+                if (foreignLots > 200) score += 3;
+                if (isSolidRed) score += 4;
+                if (clv >= 0.7m) score += 4;
+                if (volumeSurgeRatio >= 1.8m) score += 4;
+                score = Math.Min(99, score);
 
-                // Plain Language Narrative (小白專用秒懂解析)
-                var narrative = GeneratePlainNarrative(q.Name, volumeSurgeRatio, nDayChangePercent, maEntanglement, matchedThemes, strategyTracks, trustStatus, usTwinName, usTitanChange);
+                var narrative = BuildActionNarrative(q, strategyTracks, matchedThemes, thematicRole, usTwinName, usTitanChange, volumeSurgeRatio, capitalInBillion, trustLots, foreignLots);
 
                 results.Add(new StockAnalysisResult
                 {
@@ -188,6 +202,7 @@ namespace StockAnalyzer.Services
                     ChangePercent = q.ChangePercent,
                     VolumeLots = q.VolumeLots,
                     TurnoverValueInMillion = Math.Round(q.TurnoverValue / 1_000_000m, 1),
+                    
                     VolumeSurgeRatio = volumeSurgeRatio,
                     VMA5Lots = vma5,
                     VMA20Lots = vma20,
@@ -197,23 +212,30 @@ namespace StockAnalyzer.Services
                     MA60 = ma60,
                     MAEntanglementPercent = maEntanglement,
                     PriceChangeInNDays = nDayChangePercent,
+
                     CLVPercent = clvPercent,
                     UpperShadowPercent = upperShadowPercent,
                     IsSolidRed = isSolidRed,
                     CapitalInBillion = capitalInBillion,
                     IsGoldenCapital = isGoldenCapital,
+
                     OvernightWhaleRisk = overnightRisk,
                     TrustStatus = trustStatus,
                     TrustNetBuyLots = trustLots,
+                    ForeignNetBuyLots = foreignLots,
+                    DealerNetBuyLots = dealerLots,
+
                     DefensivePrice = defensivePrice,
                     StopLossPercent = stopLossPercent,
                     TargetPrice = targetPrice,
                     PotentialProfitPercent = potentialProfitPercent,
                     RiskRewardRatio = riskReward,
                     TrailingStopPrice = trailingStopPrice,
+
                     UsTwinName = usTwinName,
                     UsTitanChangePercent = usTitanChange,
                     UsLinkageImpact = usImpactDesc,
+
                     MatchedThemes = matchedThemes,
                     ThematicRole = thematicRole,
                     StrategyTracks = strategyTracks,
@@ -226,31 +248,40 @@ namespace StockAnalyzer.Services
             return results.OrderByDescending(r => r.MasterScore).ThenByDescending(r => r.VolumeSurgeRatio).ToList();
         }
 
-        private string GeneratePlainNarrative(
-            string name, 
-            decimal surgeRatio, 
-            decimal nDayChange, 
-            decimal entanglement, 
+        private string BuildActionNarrative(
+            StockRawQuote q, 
+            List<string> tracks, 
             List<string> themes, 
-            List<string> tracks,
-            string trustStatus,
+            string thematicRole,
             string usTwinName,
-            decimal usTitanChange)
+            decimal usTitanChange,
+            decimal surgeRatio,
+            decimal capitalInBillion,
+            long trustLots,
+            long foreignLots)
         {
-            var themeText = themes.Count > 0 ? themes.First() : "熱門產業";
-            var surgeText = surgeRatio >= 2.0m ? $"成交量暴增 {surgeRatio} 倍主力大量吸籌" : $"量能溫和放大 {surgeRatio} 倍";
-            var priceText = nDayChange <= 2.0m ? "股價仍在低檔盤整完全沒漲到" : "股價剛自底部微微起步";
+            var themeStr = themes.Count > 0 ? string.Join("、", themes.Take(2)) : q.Sector;
+            var usStr = !string.IsNullOrEmpty(usTwinName) ? $"連動美股 {usTwinName} ({usTitanChange:+0.0;-0.0}%)，" : "";
+            var capStr = capitalInBillion > 0 ? $"實收股本 {capitalInBillion:0.0} 億" : "";
+            var instStr = trustLots > 0 ? $"投信買超 {trustLots} 張" : (foreignLots > 0 ? $"外資買超 {foreignLots} 張" : "");
 
-            var usText = !string.IsNullOrEmpty(usTwinName) && usTitanChange > 1.0m 
-                ? $"，且獲【{usTwinName} 大漲 {usTitanChange:+0.0;-0.0}%】美股外溢強力加持" 
-                : "";
-
-            var actionText = "【即將展開紅色噴出主升段】";
-            if (tracks.Contains("breakout")) actionText = "【均線糾結壓縮完畢，今日第一根表態突破】";
-            if (tracks.Contains("pullback")) actionText = "【拉回洗盤量縮守穩，第二波最佳上車點】";
-            if (tracks.Contains("stealth")) actionText = "【主力壓盤暗中吃貨，安全底座極為扎實】";
-
-            return $"💡【小白秒懂分析】：{name} 搭上【{themeText}】話題{usText}，最近 {surgeText}，但 {priceText}！{actionText}。下方防守點極小，上方獲利空間大，為高勝率起漲潛力股！";
+            if (tracks.Contains("golden"))
+            {
+                return $"【雙料起漲極品】{q.Name} 兼具資金風口與主力吸籌特徵，今日成交量放大 {surgeRatio} 倍，{usStr}{capStr}籌碼集中度高，建議嚴守停損點逢低分批佈局。";
+            }
+            if (tracks.Contains("stealth"))
+            {
+                return $"【主力低檔吸籌】{q.Name} 股價於底部區間整理，今日單日放量 {surgeRatio} 倍但漲幅溫和未被市場散戶發覺，{instStr}主力吃貨跡象明確。";
+            }
+            if (tracks.Contains("hotmoney"))
+            {
+                return $"【熱錢初動接棒】{q.Name} 隸屬於熱門題材「{themeStr}」，{usStr}獲主力買盤第一時間點火進駐，具備強烈續攻潛力。";
+            }
+            if (tracks.Contains("breakout"))
+            {
+                return $"【均線糾結突破】{q.Name} 經多日壓縮整理，均線糾結後今日首根帶量突破，技術面翻多確立，適合順勢操作。";
+            }
+            return $"【拉回守穩上車】{q.Name} 回測月季線支撐守穩，量縮洗盤乾淨，風險報酬比極佳。";
         }
     }
 }
