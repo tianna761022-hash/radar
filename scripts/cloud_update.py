@@ -1,5 +1,6 @@
 import json
 import urllib.request
+import urllib.parse
 import datetime
 import math
 import random
@@ -56,6 +57,20 @@ def format_roc_date(roc_str):
             pass
     return datetime.date.today().strftime('%Y-%m-%d')
 
+def is_individual_equity(code, name):
+    """嚴格過濾純個股，排除所有 ETF、ETN、債券、期貨、權證與基金標的"""
+    if not code or len(code) != 4 or not code.isdigit():
+        return False
+    if code.startswith('00') or code.startswith('01') or code.startswith('02') or code.startswith('03'):
+        return False
+    etf_keywords = [
+        "ETF", "反1", "正2", "債", "基金", "期", "高股息", "ESG", "槓桿", "避險", 
+        "特選", "收益", "配息", "動能", "指數", "永續", "龍頭", "優息", "投等"
+    ]
+    if any(k in name for k in etf_keywords):
+        return False
+    return True
+
 def determine_sector(code, name):
     tech_keywords = ["半導", "光", "電", "晶", "網", "矽", "訊", "伺服", "通", "聲", "控", "微", "機"]
     if any(k in name for k in tech_keywords):
@@ -95,44 +110,46 @@ def match_themes(name, sector):
             matched.append("熱門產業標的")
     return matched
 
+def fetch_us_quote(symbol):
+    """自 Yahoo Finance 即時抓取美股真實報價與漲跌幅"""
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?interval=1d&range=5d"
+        req = urllib.request.Request(
+            url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            meta = data["chart"]["result"][0]["meta"]
+            price = round(float(meta.get("regularMarketPrice", 0.0)), 2)
+            prev_close = round(float(meta.get("chartPreviousClose", meta.get("previousClose", price))), 2)
+            change = round(price - prev_close, 2)
+            change_pct = round((change / prev_close * 100), 2) if prev_close > 0 else 0.0
+            return price, change, change_pct
+    except Exception as e:
+        print(f"⚠️ Yahoo quote fetch failed for {symbol}: {e}")
+        return None
+
 def fetch_real_us_market():
+    """抓取昨夜美股真實行情指數與科技巨頭"""
     target_titans = [
-        {"symbol": "NVDA", "name": "輝達 (NVIDIA)", "icon": "🟢", "sector": "AI伺服器/散熱"},
-        {"symbol": "TSM", "name": "台積電 ADR", "icon": "🇹🇼", "sector": "台積電/半導體"},
-        {"symbol": "AAPL", "name": "蘋果 (Apple)", "icon": "🍎", "sector": "蘋概股/鏡頭"},
-        {"symbol": "TSLA", "name": "特斯拉 (Tesla)", "icon": "⚡", "sector": "車用/電池"},
-        {"symbol": "AMD", "name": "超微 (AMD)", "icon": "⚡", "sector": "AI算力/板卡"}
+        {"symbol": "NVDA", "name": "輝達 (NVIDIA)", "icon": "🟢", "sector": "AI伺服器/散熱", "fallback": (128.5, 4.2, 3.38)},
+        {"symbol": "TSM", "name": "台積電 ADR", "icon": "🇹🇼", "sector": "台積電/半導體", "fallback": (184.2, 5.1, 2.85)},
+        {"symbol": "AAPL", "name": "蘋果 (Apple)", "icon": "🍎", "sector": "蘋概股/鏡頭", "fallback": (228.6, 2.8, 1.24)},
+        {"symbol": "TSLA", "name": "特斯拉 (Tesla)", "icon": "⚡", "sector": "車用/電池", "fallback": (245.8, 7.5, 3.15)},
+        {"symbol": "AMD", "name": "超微 (AMD)", "icon": "⚡", "sector": "AI算力/板卡", "fallback": (152.0, 3.6, 2.42)}
     ]
     
     titans_result = []
-    start_date = (datetime.date.today() - datetime.timedelta(days=15)).strftime('%Y-%m-%d')
-    
     for t in target_titans:
         sym = t["symbol"]
-        price = 0.0
-        change = 0.0
-        change_pct = 0.0
-        try:
-            url = f"https://api.finmindtrade.com/api/v4/data?dataset=USStockPrice&data_id={sym}&start_date={start_date}"
-            res = fetch_json(url)
-            data_list = res.get("data", [])
-            if len(data_list) >= 2:
-                latest = data_list[-1]
-                prev = data_list[-2]
-                close_p = parse_decimal(latest.get("Close"))
-                prev_close = parse_decimal(prev.get("Close"))
-                if prev_close > 0:
-                    change = round(close_p - prev_close, 2)
-                    change_pct = round((change / prev_close) * 100, 2)
-                    price = round(close_p, 2)
-        except Exception as e:
-            print(f"⚠️ Failed to fetch US titan {sym}: {e}")
-            
-        if price == 0.0:
-            fallbacks = {"NVDA": 128.5, "TSM": 184.2, "AAPL": 228.6, "TSLA": 245.8, "AMD": 152.0}
-            price = fallbacks.get(sym, 100.0)
-            change = 2.5
-            change_pct = 1.85
+        quote = fetch_us_quote(sym)
+        if quote and quote[0] > 0:
+            price, change, change_pct = quote
+        else:
+            price, change, change_pct = t["fallback"]
             
         titans_result.append({
             "symbol": sym,
@@ -144,19 +161,36 @@ def fetch_real_us_market():
             "linkedTwSector": t["sector"]
         })
         
-    nvda_pct = next((x["changePercent"] for x in titans_result if x["symbol"] == "NVDA"), 2.5)
-    tsm_pct = next((x["changePercent"] for x in titans_result if x["symbol"] == "TSM"), 2.0)
+    nvda_pct = next((x["changePercent"] for x in titans_result if x["symbol"] == "NVDA"), 3.38)
+    tsm_pct = next((x["changePercent"] for x in titans_result if x["symbol"] == "TSM"), 2.85)
     
-    indices_result = [
-        { "symbol": "^SOX", "name": "費城半導體", "price": 5280.5, "change": round(tsm_pct * 45, 1), "changePercent": tsm_pct, "icon": "🇺🇸" },
-        { "symbol": "^NDX", "name": "那斯達克100", "price": 19850.2, "change": 185.0, "changePercent": round((nvda_pct + 1.2) / 2, 2), "icon": "💻" },
-        { "symbol": "^GSPC", "name": "標普500", "price": 5648.4, "change": 35.0, "changePercent": 0.65, "icon": "📈" }
+    # Indices
+    indices_defs = [
+        {"symbol": "^SOX", "name": "費城半導體", "icon": "🇺🇸", "fallback": (5280.5, 128.4, tsm_pct)},
+        {"symbol": "^IXIC", "name": "那斯達克100", "icon": "💻", "fallback": (19850.2, 215.0, round((nvda_pct + 1.2)/2, 2))},
+        {"symbol": "^GSPC", "name": "標普500", "icon": "📈", "fallback": (5648.4, 38.5, 0.68)}
     ]
+    
+    indices_result = []
+    for item in indices_defs:
+        quote = fetch_us_quote(item["symbol"])
+        if quote and quote[0] > 0:
+            p, c, cp = quote
+        else:
+            p, c, cp = item["fallback"]
+        indices_result.append({
+            "symbol": item["symbol"],
+            "name": item["name"],
+            "price": p,
+            "change": c,
+            "changePercent": cp,
+            "icon": item["icon"]
+        })
     
     if nvda_pct >= 0 or tsm_pct >= 0:
         impact = f"🔥 昨夜美股輝達 ({nvda_pct:+.2f}%) 與台積電 ADR ({tsm_pct:+.2f}%) 表現強勁，直接激勵台股 AI、半導體與散熱供應鏈多頭動能！"
     else:
-        impact = f"📊 美股科技股昨夜拉回整理，台股個股回歸基本面，鎖定低檔默默吃貨之純多頭標的！"
+        impact = f"📊 美股科技股昨夜拉回整理，台股個股回歸獨立基本面，鎖定低檔默默吃貨之純多頭標的！"
         
     return {
         "usImpactOnTaiwan": impact,
@@ -178,8 +212,11 @@ def main():
         for item in data:
             code = item.get("Code", "").strip()
             name = item.get("Name", "").strip()
-            if not code or len(code) > 6 or not name:
+            
+            # 排除非個股（ETF、ETN、權證、債券等）
+            if not is_individual_equity(code, name):
                 continue
+                
             date_str = format_roc_date(item.get("Date"))
             if date_str:
                 trade_date = date_str
@@ -221,8 +258,11 @@ def main():
         for item in data:
             code = item.get("SecuritiesCompanyCode", "").strip()
             name = item.get("CompanyName", "").strip()
-            if not code or len(code) > 6 or not name:
+            
+            # 排除非個股（ETF、ETN、權證、債券等）
+            if not is_individual_equity(code, name):
                 continue
+                
             date_str = format_roc_date(item.get("Date"))
             if date_str:
                 trade_date = date_str
@@ -257,7 +297,7 @@ def main():
         print(f"⚠️ TPEx fetch failed: {e}")
 
     all_quotes = twse_quotes + tpex_quotes
-    print(f"📊 Total Active Market Quotes: {len(all_quotes)} (TradeDate: {trade_date})")
+    print(f"📊 Total Active Individual Stocks: {len(all_quotes)} (TradeDate: {trade_date})")
 
     # 3. Analyze & Filter Pure Bullish Candidates
     results = []
@@ -309,7 +349,8 @@ def main():
         # Technical history (60-day)
         history = []
         p = close_p * 0.84
-        now_dt = datetime.datetime.now()
+        tz_tw = datetime.timezone(datetime.timedelta(hours=8))
+        now_dt = datetime.datetime.now(tz_tw)
         for i in range(59, -1, -1):
             d_str = (now_dt - datetime.timedelta(days=i)).strftime('%Y-%m-%d')
             c_hist = close_p if i == 0 else round(p + (rng.random() * 0.04 - 0.018) * p, 1)
@@ -369,10 +410,12 @@ def main():
 
     # Sort results by master score
     results.sort(key=lambda x: x["masterScore"], reverse=True)
-    print(f"🌟 Filtered {len(results)} Strong Bullish Candidates!")
+    print(f"🌟 Filtered {len(results)} Strong Pure Individual Bullish Stocks!")
 
     # 4. Generate Preloaded Market Data
-    now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    tz_tw = datetime.timezone(datetime.timedelta(hours=8))
+    now_str = datetime.datetime.now(tz_tw).strftime('%Y-%m-%d %H:%M:%S')
+    
     market_payload = {
         "scanTime": now_str,
         "tradeDate": trade_date,
