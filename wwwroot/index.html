@@ -411,12 +411,12 @@
                 <i class="fa-solid fa-shield-halved"></i>
             </div>
             <h2>🔒 私人專屬看盤雷達</h2>
-            <p class="login-sub">請輸入私人通關密碼（預設通關密碼：<strong style="color:var(--gold);">888888</strong>）</p>
+            <p class="login-sub">請輸入私人通關密碼</p>
             
             <form id="formLogin" onsubmit="event.preventDefault(); handleLoginSubmit(event);">
                 <div class="login-input-wrap">
                     <i class="fa-solid fa-key login-input-icon"></i>
-                    <input type="password" id="inputLoginPassword" class="login-input" placeholder="請輸入通關密碼..." value="888888" autocomplete="current-password" required>
+                    <input type="password" id="inputLoginPassword" class="login-input" placeholder="請輸入通關密碼..." value="" autocomplete="current-password" required autofocus>
                     <button type="button" class="btn-toggle-pwd" id="btnTogglePwd" onclick="toggleLoginPassword(event)" title="顯示/隱藏密碼">
                         <i class="fa-solid fa-eye" id="eyeIcon"></i>
                     </button>
@@ -424,17 +424,14 @@
                 <div class="login-options">
                     <label class="login-chk-label">
                         <input type="checkbox" id="chkRememberAuth" checked>
-                        <span>記住此裝置（下次自動解鎖）</span>
+                        <span>記住此裝置（下次自動解鎖進入）</span>
                     </label>
                 </div>
                 <div class="login-error-msg" id="loginErrorMsg"></div>
                 <button type="submit" class="btn btn-primary btn-login-submit" id="btnLoginSubmit" onclick="handleLoginSubmit(event)">
-                    <i class="fa-solid fa-lock-open"></i> 一鍵解鎖進入系統
+                    <i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統
                 </button>
             </form>
-            <div class="login-footer-tip">
-                <small>🛡️ 預設通關密碼為 <strong>888888</strong>，可隨時在環境變數 (ACCESS_PASSWORD) 中自訂</small>
-            </div>
         </div>
     </div>
 
@@ -457,17 +454,53 @@
         async function handleLoginSubmit(e) {
             if (e && e.preventDefault) e.preventDefault();
             var input = document.getElementById('inputLoginPassword');
-            var pwd = (input ? input.value : '').trim() || '888888';
+            var pwd = (input ? input.value : '').trim();
             var errMsg = document.getElementById('loginErrorMsg');
             var btn = document.getElementById('btnLoginSubmit');
             var overlay = document.getElementById('loginModalOverlay');
             var chk = document.getElementById('chkRememberAuth');
+
+            if (!pwd) {
+                if (errMsg) errMsg.textContent = '⚠️ 請先輸入私人通關密碼！';
+                return;
+            }
 
             if (btn) {
                 btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> 驗證中...';
                 btn.disabled = true;
             }
             if (errMsg) errMsg.textContent = '';
+
+            function unlockSuccess() {
+                var token = btoa(pwd);
+                if (chk && chk.checked) {
+                    localStorage.setItem('taiwan_stock_auth_token', token);
+                } else {
+                    sessionStorage.setItem('taiwan_stock_auth_token', token);
+                }
+                if (window.state) window.state.authToken = token;
+                if (overlay) {
+                    overlay.style.display = 'none';
+                    overlay.classList.add('hidden');
+                }
+                if (typeof loadScanData === 'function') {
+                    loadScanData(false);
+                }
+            }
+
+            var isStaticHost = window.location.hostname.endsWith('github.io') || window.location.protocol === 'file:' || !window.location.origin.includes('localhost');
+            if (isStaticHost) {
+                if (pwd === '888888') {
+                    unlockSuccess();
+                } else {
+                    if (errMsg) errMsg.textContent = '❌ 密碼錯誤，請重新輸入！';
+                }
+                if (btn) {
+                    btn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統';
+                    btn.disabled = false;
+                }
+                return;
+            }
 
             try {
                 var resp = await fetch('/api/auth/login', {
@@ -477,41 +510,20 @@
                 });
 
                 if (resp.ok) {
-                    var data = await resp.json();
-                    var token = data.token || btoa(pwd);
-                    if (chk && chk.checked) {
-                        localStorage.setItem('taiwan_stock_auth_token', token);
-                    } else {
-                        sessionStorage.setItem('taiwan_stock_auth_token', token);
-                    }
-                    if (window.state) window.state.authToken = token;
-                    
-                    if (overlay) {
-                        overlay.style.display = 'none';
-                        overlay.classList.add('hidden');
-                    }
-                    if (typeof loadScanData === 'function') {
-                        loadScanData(false);
-                    }
+                    unlockSuccess();
                 } else {
                     var errData = await resp.json().catch(function() { return {}; });
-                    if (errMsg) errMsg.textContent = errData.message || '❌ 密碼錯誤，請確認後重新輸入！';
+                    if (errMsg) errMsg.textContent = errData.message || '❌ 密碼錯誤，請重新輸入！';
                 }
             } catch (err) {
-                // Fallback unlock for offline/standalone mode
-                var token = btoa(pwd);
-                localStorage.setItem('taiwan_stock_auth_token', token);
-                if (window.state) window.state.authToken = token;
-                if (overlay) {
-                    overlay.style.display = 'none';
-                    overlay.classList.add('hidden');
-                }
-                if (typeof loadScanData === 'function') {
-                    loadScanData(false);
+                if (pwd === '888888') {
+                    unlockSuccess();
+                } else {
+                    if (errMsg) errMsg.textContent = '❌ 密碼錯誤，請重新輸入！';
                 }
             } finally {
                 if (btn) {
-                    btn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 一鍵解鎖進入系統';
+                    btn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統';
                     btn.disabled = false;
                 }
             }

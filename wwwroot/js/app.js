@@ -202,21 +202,48 @@ async function handleLoginSubmit(e) {
     if (e && e.preventDefault) e.preventDefault();
     const pwdInput = inputLoginPassword || document.getElementById('inputLoginPassword');
     const pwd = (pwdInput?.value || '').trim();
-    if (!pwd) {
-        if (loginErrorMsg) loginErrorMsg.textContent = '⚠️ 請輸入密碼後再點擊解鎖！';
-        return;
-    }
 
     const submitBtn = btnLoginSubmit || document.getElementById('btnLoginSubmit');
     const errMsgEl = loginErrorMsg || document.getElementById('loginErrorMsg');
     const chkRemember = chkRememberAuth || document.getElementById('chkRememberAuth');
     const overlay = loginModalOverlay || document.getElementById('loginModalOverlay');
 
+    if (!pwd) {
+        if (errMsgEl) errMsgEl.textContent = '⚠️ 請先輸入私人通關密碼！';
+        return;
+    }
+
     if (submitBtn) {
         submitBtn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> 驗證中...';
         submitBtn.disabled = true;
     }
     if (errMsgEl) errMsgEl.textContent = '';
+
+    function unlockApp() {
+        const token = btoa(pwd);
+        if (chkRemember?.checked) localStorage.setItem(AUTH_TOKEN_KEY, token);
+        state.authToken = token;
+        if (overlay) {
+            overlay.classList.add('hidden');
+            overlay.style.display = 'none';
+        }
+        showToast('🔓 密碼驗證成功，歡迎進入看盤系統！');
+        loadScanData(false);
+    }
+
+    const isStaticHost = window.location.hostname.endsWith('github.io') || window.location.protocol === 'file:' || !window.location.origin.includes('localhost');
+    if (isStaticHost) {
+        if (pwd === '888888') {
+            unlockApp();
+        } else {
+            if (errMsgEl) errMsgEl.textContent = '❌ 密碼錯誤，請重新輸入！';
+        }
+        if (submitBtn) {
+            submitBtn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統';
+            submitBtn.disabled = false;
+        }
+        return;
+    }
 
     try {
         const resp = await fetch('/api/auth/login', {
@@ -226,31 +253,20 @@ async function handleLoginSubmit(e) {
         });
 
         if (resp.ok) {
-            const data = await resp.json();
-            const token = data.token || btoa(pwd);
-            if (chkRemember?.checked) {
-                localStorage.setItem(AUTH_TOKEN_KEY, token);
-            } else {
-                sessionStorage.setItem(AUTH_TOKEN_KEY, token);
-            }
-            state.authToken = token;
-            if (overlay) overlay.classList.add('hidden');
-            showToast('🔓 密碼驗證成功，歡迎進入看盤系統！');
-            loadScanData(false);
+            unlockApp();
         } else {
-            const errData = await resp.json().catch(() => ({}));
-            if (errMsgEl) errMsgEl.textContent = errData.message || '❌ 密碼錯誤，請確認後重新輸入！';
+            var errData = await resp.json().catch(() => ({}));
+            if (errMsgEl) errMsgEl.textContent = errData.message || '❌ 密碼錯誤，請重新輸入！';
         }
     } catch (err) {
-        // Fallback / Standalone mode
-        const token = btoa(pwd);
-        if (chkRemember?.checked) localStorage.setItem(AUTH_TOKEN_KEY, token);
-        state.authToken = token;
-        if (overlay) overlay.classList.add('hidden');
-        loadScanData(false);
+        if (pwd === '888888') {
+            unlockApp();
+        } else {
+            if (errMsgEl) errMsgEl.textContent = '❌ 密碼錯誤，請重新輸入！';
+        }
     } finally {
         if (submitBtn) {
-            submitBtn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 解鎖進入系統';
+            submitBtn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統';
             submitBtn.disabled = false;
         }
     }
@@ -258,20 +274,24 @@ async function handleLoginSubmit(e) {
 window.handleLoginSubmit = handleLoginSubmit;
 
 function getSavedAuthToken() {
-    return state.authToken || localStorage.getItem(AUTH_TOKEN_KEY) || sessionStorage.getItem(AUTH_TOKEN_KEY) || 'ODg4ODg4';
+    return state.authToken || localStorage.getItem(AUTH_TOKEN_KEY) || sessionStorage.getItem(AUTH_TOKEN_KEY);
 }
 
 function checkAuthAndInit() {
     const token = getSavedAuthToken();
     if (token) {
         state.authToken = token;
-        if (loginModalOverlay) loginModalOverlay.classList.add('hidden');
+        if (loginModalOverlay) {
+            loginModalOverlay.classList.add('hidden');
+            loginModalOverlay.style.display = 'none';
+        }
         loadScanData(false);
     } else {
         if (loginModalOverlay) {
             loginModalOverlay.classList.remove('hidden');
+            loginModalOverlay.style.display = 'flex';
             if (inputLoginPassword) {
-                inputLoginPassword.value = '888888';
+                inputLoginPassword.value = '';
                 inputLoginPassword.focus();
             }
         }
@@ -284,13 +304,14 @@ function logout() {
     state.authToken = null;
     if (loginModalOverlay) {
         loginModalOverlay.classList.remove('hidden');
+        loginModalOverlay.style.display = 'flex';
         if (inputLoginPassword) {
-            inputLoginPassword.value = '888888';
+            inputLoginPassword.value = '';
             inputLoginPassword.focus();
         }
         if (loginErrorMsg) loginErrorMsg.textContent = '';
     }
-    showToast('🔒 畫面已上鎖，請輸入密碼解鎖（預設: 888888）。');
+    showToast('🔒 畫面已上鎖，請輸入密碼解鎖。');
 }
 
 // --- Fetch API Data or Autonomous Standalone Engine ---
