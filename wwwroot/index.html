@@ -55,9 +55,6 @@
                 <button class="btn btn-primary" id="btnRefreshScan">
                     <i class="fa-solid fa-rotate"></i> <span class="btn-text">全市場掃描</span>
                 </button>
-                <button class="btn btn-outline" id="btnLogout" title="鎖定畫面 / 登出" style="padding: 0.55rem 0.85rem; border-color: rgba(255,255,255,0.15);">
-                    <i class="fa-solid fa-lock"></i> <span class="btn-text">上鎖</span>
-                </button>
             </div>
         </div>
     </header>
@@ -404,135 +401,9 @@
         </div>
     </div>
 
-    <!-- Private Access Login Overlay -->
-    <div class="login-modal-overlay" id="loginModalOverlay">
-        <div class="login-card">
-            <div class="login-badge">
-                <i class="fa-solid fa-shield-halved"></i>
-            </div>
-            <h2>🔒 私人專屬看盤雷達</h2>
-            <p class="login-sub">請輸入私人通關密碼</p>
-            
-            <form id="formLogin" onsubmit="event.preventDefault(); handleLoginSubmit(event);">
-                <div class="login-input-wrap">
-                    <i class="fa-solid fa-key login-input-icon"></i>
-                    <input type="password" id="inputLoginPassword" class="login-input" placeholder="請輸入通關密碼..." value="" autocomplete="current-password" required autofocus>
-                    <button type="button" class="btn-toggle-pwd" id="btnTogglePwd" onclick="toggleLoginPassword(event)" title="顯示/隱藏密碼">
-                        <i class="fa-solid fa-eye" id="eyeIcon"></i>
-                    </button>
-                </div>
-                <div class="login-options">
-                    <label class="login-chk-label">
-                        <input type="checkbox" id="chkRememberAuth" checked>
-                        <span>記住此裝置（下次自動解鎖進入）</span>
-                    </label>
-                </div>
-                <div class="login-error-msg" id="loginErrorMsg"></div>
-                <button type="submit" class="btn btn-primary btn-login-submit" id="btnLoginSubmit" onclick="handleLoginSubmit(event)">
-                    <i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統
-                </button>
-            </form>
-        </div>
-    </div>
-
-    <!-- Bulletproof Inline Auth Controller -->
-    <script>
-        function toggleLoginPassword(e) {
-            if (e) { e.preventDefault(); e.stopPropagation(); }
-            var input = document.getElementById('inputLoginPassword');
-            var eye = document.getElementById('eyeIcon');
-            if (!input) return;
-            if (input.type === 'password') {
-                input.type = 'text';
-                if (eye) eye.className = 'fa-solid fa-eye-slash';
-            } else {
-                input.type = 'password';
-                if (eye) eye.className = 'fa-solid fa-eye';
-            }
-        }
-
-        async function handleLoginSubmit(e) {
-            if (e && e.preventDefault) e.preventDefault();
-            var input = document.getElementById('inputLoginPassword');
-            var pwd = (input ? input.value : '').trim();
-            var errMsg = document.getElementById('loginErrorMsg');
-            var btn = document.getElementById('btnLoginSubmit');
-            var overlay = document.getElementById('loginModalOverlay');
-            var chk = document.getElementById('chkRememberAuth');
-
-            if (!pwd) {
-                if (errMsg) errMsg.textContent = '⚠️ 請先輸入私人通關密碼！';
-                return;
-            }
-
-            if (btn) {
-                btn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> 驗證中...';
-                btn.disabled = true;
-            }
-            if (errMsg) errMsg.textContent = '';
-
-            function unlockSuccess() {
-                var token = btoa(pwd);
-                if (chk && chk.checked) {
-                    localStorage.setItem('taiwan_stock_auth_token', token);
-                } else {
-                    sessionStorage.setItem('taiwan_stock_auth_token', token);
-                }
-                if (window.state) window.state.authToken = token;
-                if (overlay) {
-                    overlay.style.display = 'none';
-                    overlay.classList.add('hidden');
-                }
-                if (typeof loadScanData === 'function') {
-                    loadScanData(false);
-                }
-            }
-
-            var isStaticHost = window.location.hostname.endsWith('github.io') || window.location.protocol === 'file:' || !window.location.origin.includes('localhost');
-            if (isStaticHost) {
-                if (pwd === '888888') {
-                    unlockSuccess();
-                } else {
-                    if (errMsg) errMsg.textContent = '❌ 密碼錯誤，請重新輸入！';
-                }
-                if (btn) {
-                    btn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統';
-                    btn.disabled = false;
-                }
-                return;
-            }
-
-            try {
-                var resp = await fetch('/api/auth/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ password: pwd })
-                });
-
-                if (resp.ok) {
-                    unlockSuccess();
-                } else {
-                    var errData = await resp.json().catch(function() { return {}; });
-                    if (errMsg) errMsg.textContent = errData.message || '❌ 密碼錯誤，請重新輸入！';
-                }
-            } catch (err) {
-                if (pwd === '888888') {
-                    unlockSuccess();
-                } else {
-                    if (errMsg) errMsg.textContent = '❌ 密碼錯誤，請重新輸入！';
-                }
-            } finally {
-                if (btn) {
-                    btn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統';
-                    btn.disabled = false;
-                }
-            }
-        }
-    </script>
-
     <!-- Scripts with Cache Buster -->
-    <script src="js/market_data.js?v=20260908_5"></script>
-    <script src="js/chart.js?v=20260908_5"></script>
-    <script src="js/app.js?v=20260908_5"></script>
+    <script src="js/market_data.js?v=20260909_02"></script>
+    <script src="js/chart.js?v=20260909_02"></script>
+    <script src="js/app.js?v=20260909_02"></script>
 </body>
 </html>

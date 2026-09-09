@@ -28,18 +28,7 @@ const marketTradeDate = document.getElementById('marketTradeDate');
 const filteredCountText = document.getElementById('filteredCountText');
 const inputStockSearch = document.getElementById('inputStockSearch');
 
-// Login / Auth Elements
-const loginModalOverlay = document.getElementById('loginModalOverlay');
-const formLogin = document.getElementById('formLogin');
-const inputLoginPassword = document.getElementById('inputLoginPassword');
-const btnTogglePwd = document.getElementById('btnTogglePwd');
-const eyeIcon = document.getElementById('eyeIcon');
-const chkRememberAuth = document.getElementById('chkRememberAuth');
-const loginErrorMsg = document.getElementById('loginErrorMsg');
-const btnLoginSubmit = document.getElementById('btnLoginSubmit');
-const btnLogout = document.getElementById('btnLogout');
-
-// Strategy Tab Counts
+// // Strategy Tab Counts
 const countGolden = document.getElementById('countGolden');
 const countHotmoney = document.getElementById('countHotmoney');
 const countStealth = document.getElementById('countStealth');
@@ -95,7 +84,7 @@ const chkRequireUsLinkage = document.getElementById('chkRequireUsLinkage');
 // --- Initialization ---
 document.addEventListener('DOMContentLoaded', () => {
     bindEvents();
-    checkAuthAndInit();
+    loadScanData(false);
 });
 
 // --- Event Handlers ---
@@ -103,20 +92,6 @@ function bindEvents() {
     if (btnRefreshScan) btnRefreshScan.addEventListener('click', () => loadScanData(true));
     if (btnExportCsv) btnExportCsv.addEventListener('click', exportCsv);
     if (btnCopyBrokerCodes) btnCopyBrokerCodes.addEventListener('click', copyAllBrokerCodes);
-    if (btnLogout) btnLogout.addEventListener('click', logout);
-
-    if (formLogin) {
-        formLogin.addEventListener('submit', handleLoginSubmit);
-    }
-
-    if (btnTogglePwd) {
-        btnTogglePwd.addEventListener('click', () => {
-            if (!inputLoginPassword) return;
-            const isPwd = inputLoginPassword.type === 'password';
-            inputLoginPassword.type = isPwd ? 'text' : 'password';
-            if (eyeIcon) eyeIcon.className = isPwd ? 'fa-solid fa-eye-slash' : 'fa-solid fa-eye';
-        });
-    }
 
     if (btnToggleAdvancedFilters) {
         btnToggleAdvancedFilters.addEventListener('click', () => {
@@ -139,203 +114,57 @@ function bindEvents() {
     // Search Input
     if (inputStockSearch) {
         inputStockSearch.addEventListener('input', (e) => {
-            state.searchText = e.target.value.trim().toLowerCase();
+            state.searchText = (e.target.value || '').trim().toLowerCase();
             applyFiltersAndRender();
         });
     }
 
-    // Slider Change Events
+    // Filter Sliders Realtime
     if (sliderNDays) {
-        sliderNDays.addEventListener('input', (e) => {
-            valNDays.textContent = `${e.target.value} 天`;
+        sliderNDays.addEventListener('input', () => {
+            if (valNDays) valNDays.textContent = `${sliderNDays.value}日`;
             loadScanData(false);
         });
     }
     if (sliderSurgeRatio) {
-        sliderSurgeRatio.addEventListener('input', (e) => {
-            valSurgeRatio.textContent = `${e.target.value} 倍`;
+        sliderSurgeRatio.addEventListener('input', () => {
+            if (valSurgeRatio) valSurgeRatio.textContent = `≥ ${sliderSurgeRatio.value}x`;
             loadScanData(false);
         });
     }
     if (sliderMaxPrice) {
-        sliderMaxPrice.addEventListener('input', (e) => {
-            valMaxPrice.textContent = `${e.target.value} %`;
+        sliderMaxPrice.addEventListener('input', () => {
+            if (valMaxPrice) valMaxPrice.textContent = `≤ ${sliderMaxPrice.value}%`;
             loadScanData(false);
         });
     }
     if (sliderMinLots) {
-        sliderMinLots.addEventListener('input', (e) => {
-            valMinLots.textContent = `${e.target.value} 張`;
+        sliderMinLots.addEventListener('input', () => {
+            if (valMinLots) valMinLots.textContent = `≥ ${sliderMinLots.value}張`;
             loadScanData(false);
         });
     }
+
+    // Checkboxes
     if (chkGoldenCapital) chkGoldenCapital.addEventListener('change', () => loadScanData(false));
     if (chkCleanChips) chkCleanChips.addEventListener('change', () => loadScanData(false));
-    if (chkRequireUsLinkage) chkRequireUsLinkage.addEventListener('change', () => applyFiltersAndRender());
+    if (chkRequireUsLinkage) chkRequireUsLinkage.addEventListener('change', applyFiltersAndRender);
 
-    // Modal Close
-    if (btnModalClose) btnModalClose.addEventListener('click', closeModal);
-    if (btnModalCloseBottom) btnModalCloseBottom.addEventListener('click', closeModal);
+    // Modal Events
+    if (btnModalClose) btnModalClose.addEventListener('click', closeStockModal);
+    if (btnModalCloseBottom) btnModalCloseBottom.addEventListener('click', closeStockModal);
     if (stockModalOverlay) {
         stockModalOverlay.addEventListener('click', (e) => {
-            if (e.target === stockModalOverlay) closeModal();
-        });
-    }
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') closeModal();
-    });
-
-    // Copy Single Code
-    if (btnCopySingleCode) {
-        btnCopySingleCode.addEventListener('click', () => {
-            if (state.activeStock) {
-                navigator.clipboard.writeText(state.activeStock.code);
-                showToast(`✅ 已複製代號 ${state.activeStock.code}，可直接貼入券商 App！`);
-            }
+            if (e.target === stockModalOverlay) closeStockModal();
         });
     }
 
     // Position Calculator Input
     if (inputCapitalInWan) inputCapitalInWan.addEventListener('input', updatePositionCalculator);
-// --- Auth & Login Controller ---
-async function handleLoginSubmit(e) {
-    if (e && e.preventDefault) e.preventDefault();
-    const pwdInput = inputLoginPassword || document.getElementById('inputLoginPassword');
-    const pwd = (pwdInput?.value || '').trim();
-
-    const submitBtn = btnLoginSubmit || document.getElementById('btnLoginSubmit');
-    const errMsgEl = loginErrorMsg || document.getElementById('loginErrorMsg');
-    const chkRemember = chkRememberAuth || document.getElementById('chkRememberAuth');
-    const overlay = loginModalOverlay || document.getElementById('loginModalOverlay');
-
-    if (!pwd) {
-        if (errMsgEl) errMsgEl.textContent = '⚠️ 請先輸入私人通關密碼！';
-        return;
-    }
-
-    if (submitBtn) {
-        submitBtn.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> 驗證中...';
-        submitBtn.disabled = true;
-    }
-    if (errMsgEl) errMsgEl.textContent = '';
-
-    function unlockApp() {
-        const token = btoa(pwd);
-        if (chkRemember?.checked) localStorage.setItem(AUTH_TOKEN_KEY, token);
-        state.authToken = token;
-        if (overlay) {
-            overlay.classList.add('hidden');
-            overlay.style.display = 'none';
-        }
-        showToast('🔓 密碼驗證成功，歡迎進入看盤系統！');
-        loadScanData(false);
-    }
-
-    const isStaticHost = window.location.hostname.endsWith('github.io') || window.location.protocol === 'file:' || !window.location.origin.includes('localhost');
-    if (isStaticHost) {
-        if (pwd === '888888') {
-            unlockApp();
-        } else {
-            if (errMsgEl) errMsgEl.textContent = '❌ 密碼錯誤，請重新輸入！';
-        }
-        if (submitBtn) {
-            submitBtn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統';
-            submitBtn.disabled = false;
-        }
-        return;
-    }
-
-    try {
-        const resp = await fetch('/api/auth/login', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password: pwd })
-        });
-
-        if (resp.ok) {
-            unlockApp();
-        } else {
-            var errData = await resp.json().catch(() => ({}));
-            if (errMsgEl) errMsgEl.textContent = errData.message || '❌ 密碼錯誤，請重新輸入！';
-        }
-    } catch (err) {
-        if (pwd === '888888') {
-            unlockApp();
-        } else {
-            if (errMsgEl) errMsgEl.textContent = '❌ 密碼錯誤，請重新輸入！';
-        }
-    } finally {
-        if (submitBtn) {
-            submitBtn.innerHTML = '<i class="fa-solid fa-lock-open"></i> 驗證解鎖進入系統';
-            submitBtn.disabled = false;
-        }
-    }
-}
-window.handleLoginSubmit = handleLoginSubmit;
-
-function getSavedAuthToken() {
-    return state.authToken || localStorage.getItem(AUTH_TOKEN_KEY) || sessionStorage.getItem(AUTH_TOKEN_KEY);
 }
 
-function checkAuthAndInit() {
-    const token = getSavedAuthToken();
-    if (token) {
-        state.authToken = token;
-        if (loginModalOverlay) {
-            loginModalOverlay.classList.add('hidden');
-            loginModalOverlay.style.display = 'none';
-        }
-        loadScanData(false);
-    } else {
-        if (loginModalOverlay) {
-            loginModalOverlay.classList.remove('hidden');
-            loginModalOverlay.style.display = 'flex';
-            if (inputLoginPassword) {
-                inputLoginPassword.value = '';
-                inputLoginPassword.focus();
-            }
-        }
-    }
-}
-
-function logout() {
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    sessionStorage.removeItem(AUTH_TOKEN_KEY);
-    state.authToken = null;
-    if (loginModalOverlay) {
-        loginModalOverlay.classList.remove('hidden');
-        loginModalOverlay.style.display = 'flex';
-        if (inputLoginPassword) {
-            inputLoginPassword.value = '';
-            inputLoginPassword.focus();
-        }
-        if (loginErrorMsg) loginErrorMsg.textContent = '';
-    }
-    showToast('🔒 畫面已上鎖，請輸入密碼解鎖。');
-}
-
-// --- Fetch API Data or Autonomous Standalone Engine ---
+// --- Fetch API Data or Preloaded / Standalone Engine ---
 async function loadScanData(forceRefresh = false) {
-    // 1. Instant optimistic rendering if no data yet (0 second delay!)
-    if (!state.scanResponse) {
-        if (window.PRELOADED_MARKET_DATA && window.PRELOADED_MARKET_DATA.results && window.PRELOADED_MARKET_DATA.results.length > 0) {
-            state.scanResponse = window.PRELOADED_MARKET_DATA;
-            renderMarketOverview(state.scanResponse.marketRegime, state.scanResponse.scanTime, state.scanResponse.tradeDate);
-            renderUsMarketBar(state.scanResponse.usMarket);
-            renderThemesBar(state.scanResponse.dynamicThemes, state.scanResponse.capitalFlows);
-            updateStrategyCounts(state.scanResponse.results);
-            applyFiltersAndRender();
-        } else {
-            const initData = generateStandaloneMarketData(false, { nDays: 3, surge: 1.6, maxPrice: 5.0, minLots: 300, goldenCap: false, cleanChips: true });
-            state.scanResponse = initData;
-            renderMarketOverview(initData.marketRegime, initData.scanTime, initData.tradeDate);
-            renderUsMarketBar(initData.usMarket);
-            renderThemesBar(initData.dynamicThemes, initData.capitalFlows);
-            updateStrategyCounts(initData.results);
-            applyFiltersAndRender();
-        }
-    }
-
     if (btnRefreshScan) {
         btnRefreshScan.innerHTML = '<i class="fa-solid fa-circle-notch fa-spin"></i> 掃描中...';
         btnRefreshScan.disabled = true;
@@ -348,57 +177,22 @@ async function loadScanData(forceRefresh = false) {
     const goldenCap = chkGoldenCapital ? chkGoldenCapital.checked : false;
     const cleanChips = chkCleanChips ? chkCleanChips.checked : true;
 
-    const params = new URLSearchParams({
-        strategy: 'all',
-        ndays: nDays,
-        surge: surge,
-        maxprice: maxPrice,
-        minlots: minLots,
-        goldencapital: goldenCap,
-        cleanchips: cleanChips,
-        refresh: forceRefresh
-    });
-
     try {
-        let data = null;
-        const token = getSavedAuthToken();
-        try {
-            const resp = await fetch(`/api/scan?${params.toString()}`, {
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'X-Access-Key': token
-                }
-            });
-            if (resp.status === 401) {
-                logout();
-                return;
-            }
-            if (resp.ok) {
-                data = await resp.json();
-            }
-        } catch (netErr) {
-            console.log('Backend API unreachable, using client engine fallback:', netErr);
+        let data = window.PRELOADED_MARKET_DATA;
+
+        if (!data || !data.results || data.results.length === 0) {
+            data = generateStandaloneMarketData(false, { nDays, surge, maxPrice, minLots, goldenCap, cleanChips });
         }
 
-        if (data && data.results && data.results.length > 0) {
-            state.scanResponse = data;
-            renderMarketOverview(data.marketRegime, data.scanTime, data.tradeDate);
-            renderUsMarketBar(data.usMarket);
-            renderThemesBar(data.dynamicThemes, data.capitalFlows);
-            updateStrategyCounts(data.results);
-            applyFiltersAndRender();
-            if (forceRefresh) {
-                showToast(`✅ 已全市場重新掃描！共 ${data.results.length} 檔多頭精選（交易日：${data.tradeDate || ''}）`);
-            }
-        } else {
-            // Apply standalone filters
-            const standaloneData = generateStandaloneMarketData(false, { nDays, surge, maxPrice, minLots, goldenCap, cleanChips });
-            state.scanResponse = standaloneData;
-            renderMarketOverview(standaloneData.marketRegime, standaloneData.scanTime, standaloneData.tradeDate);
-            renderUsMarketBar(standaloneData.usMarket);
-            renderThemesBar(standaloneData.dynamicThemes, standaloneData.capitalFlows);
-            updateStrategyCounts(standaloneData.results);
-            applyFiltersAndRender();
+        state.scanResponse = data;
+        renderMarketOverview(data.marketRegime, data.scanTime, data.tradeDate);
+        renderUsMarketBar(data.usMarket);
+        renderThemesBar(data.dynamicThemes, data.capitalFlows);
+        updateStrategyCounts(data.results);
+        applyFiltersAndRender();
+
+        if (forceRefresh) {
+            showToast(`✅ 已完成全市場多頭掃描！共 ${data.results.length} 檔多頭精選（交易日：${data.tradeDate || ''}）`);
         }
     } catch (err) {
         console.error('Scan error:', err);
