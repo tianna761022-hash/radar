@@ -91,6 +91,10 @@ def match_themes(name, sector):
     if not matched:
         if "半導體" in sector:
             matched.append("晶圓代工")
+        else:
+            matched.append("熱門產業標的")
+    return matched
+
 def fetch_real_us_market():
     target_titans = [
         {"symbol": "NVDA", "name": "輝達 (NVIDIA)", "icon": "🟢", "sector": "AI伺服器/散熱"},
@@ -401,12 +405,15 @@ def main():
         "results": results
     }
 
-    # Write market_data.js
+    # Write market_data.js to both wwwroot/js and js (root)
     js_content = f"window.PRELOADED_MARKET_DATA = {json.dumps(market_payload, ensure_ascii=False, indent=2)};\n"
     os.makedirs("wwwroot/js", exist_ok=True)
     with open("wwwroot/js/market_data.js", "w", encoding="utf-8") as f:
         f.write(js_content)
-    print("✅ Successfully generated wwwroot/js/market_data.js")
+    os.makedirs("js", exist_ok=True)
+    with open("js/market_data.js", "w", encoding="utf-8") as f:
+        f.write(js_content)
+    print("✅ Successfully generated wwwroot/js/market_data.js and js/market_data.js")
 
     # Write Data/market_snapshot.json
     snapshot_payload = {
