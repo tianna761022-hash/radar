@@ -1,0 +1,14 @@
+d:\stk\scripts\Updater\bin\Debug\net9.0\Updater.exe
+d:\stk\scripts\Updater\bin\Debug\net9.0\Updater.deps.json
+d:\stk\scripts\Updater\bin\Debug\net9.0\Updater.runtimeconfig.json
+d:\stk\scripts\Updater\bin\Debug\net9.0\Updater.dll
+d:\stk\scripts\Updater\bin\Debug\net9.0\Updater.pdb
+d:\stk\scripts\Updater\obj\Debug\net9.0\Updater.GeneratedMSBuildEditorConfig.editorconfig
+d:\stk\scripts\Updater\obj\Debug\net9.0\Updater.AssemblyInfoInputs.cache
+d:\stk\scripts\Updater\obj\Debug\net9.0\Updater.AssemblyInfo.cs
+d:\stk\scripts\Updater\obj\Debug\net9.0\Updater.csproj.CoreCompileInputs.cache
+d:\stk\scripts\Updater\obj\Debug\net9.0\Updater.dll
+d:\stk\scripts\Updater\obj\Debug\net9.0\refint\Updater.dll
+d:\stk\scripts\Updater\obj\Debug\net9.0\Updater.pdb
+d:\stk\scripts\Updater\obj\Debug\net9.0\Updater.genruntimeconfig.cache
+d:\stk\scripts\Updater\obj\Debug\net9.0\ref\Updater.dll

@@ -1062,6 +1062,88 @@ input[type="range"] {
     gap: 1rem;
 }
 
+/* Action Guide Highlight Banner in Modal */
+.action-guide-banner {
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(255, 59, 92, 0.18));
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 12px;
+    margin: 0.9rem 1.8rem 0;
+    padding: 0.85rem 1.2rem;
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    box-shadow: 0 4px 15px rgba(245, 158, 11, 0.1);
+}
+
+.action-guide-banner .ag-icon {
+    font-size: 1.4rem;
+    color: var(--gold);
+    flex-shrink: 0;
+}
+
+.action-guide-banner .ag-text {
+    font-size: 0.92rem;
+    color: #fef08a;
+    line-height: 1.5;
+}
+
+.action-guide-banner .ag-text strong {
+    color: #fff;
+    font-weight: 800;
+}
+
+/* Touch-Friendly Theme Buttons */
+.theme-icon-btn {
+    background: rgba(15, 23, 42, 0.8);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #cbd5e1;
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 700;
+    cursor: pointer;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    flex-shrink: 0;
+}
+
+.theme-icon-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.25);
+    color: #fff;
+    transform: translateY(-1px);
+}
+
+.theme-icon-btn.active {
+    background: linear-gradient(135deg, rgba(255, 59, 92, 0.25), rgba(225, 29, 72, 0.35));
+    border-color: var(--bull-red);
+    color: #ff6b81;
+    box-shadow: 0 0 12px rgba(255, 59, 92, 0.25);
+}
+
+.badge-real-chart {
+    background: rgba(16, 185, 129, 0.15);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    color: #34d399;
+    font-size: 0.72rem;
+    font-weight: 800;
+    padding: 3px 8px;
+    border-radius: 6px;
+}
+
+.glow-gold {
+    box-shadow: 0 0 15px rgba(245, 158, 11, 0.3) !important;
+}
+
+.tab-icon-wrap {
+    font-size: 0.95rem;
+    display: inline-flex;
+    align-items: center;
+}
+
 .analysis-card {
     background: var(--bg-card);
     border: 1px solid var(--border-color);
